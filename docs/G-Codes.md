@@ -154,19 +154,13 @@ The following commands are available when the
 section](Config_Reference.md#axis_twist_compensation) is enabled.
 
 #### AXIS_TWIST_COMPENSATION_CALIBRATE
-`AXIS_TWIST_COMPENSATION_CALIBRATE [AXIS=<X|Y>] [AUTO=<True|False>]
-[SAMPLE_COUNT=<value>]`
+`AXIS_TWIST_COMPENSATION_CALIBRATE [AXIS=<X|Y>] [SAMPLE_COUNT=<value>]`
 
 Calibrates axis twist compensation by specifying the target axis or
 enabling automatic calibration.
 
 - **AXIS:** Define the axis (`X` or `Y`) for which the twist compensation
 will be calibrated. If not specified, the axis defaults to `'X'`.
-
-- **AUTO:** Enables automatic calibration mode. When `AUTO=True`, the
-calibration will run for both the X and Y axes. In this mode, `AXIS`
-cannot be specified. If both `AXIS` and `AUTO` are provided, an error
-will be raised.
 
 ### [bed_mesh]
 
@@ -721,6 +715,40 @@ and RAW sensor value for calibration points.
 #### DISABLE_FILAMENT_WIDTH_LOG
 `DISABLE_FILAMENT_WIDTH_LOG`: Turn off diameter logging.
 
+### [load_cell]
+
+The following commands are enabled if a
+[load_cell config section](Config_Reference.md#load_cell) has been enabled.
+
+### LOAD_CELL_DIAGNOSTIC
+`LOAD_CELL_DIAGNOSTIC [LOAD_CELL=<config_name>]`: This command collects 10
+seconds of load cell data and reports statistics that can help you verify proper
+operation of the load cell. This command can be run on both calibrated and
+uncalibrated load cells.
+
+### LOAD_CELL_CALIBRATE
+`LOAD_CELL_CALIBRATE [LOAD_CELL=<config_name>]`: Start the guided calibration
+utility. Calibration is a 3 step process:
+1. First you remove all load from the load cell and run the `TARE` command
+1. Next you apply a known load to the load cell and run the
+`CALIBRATE GRAMS=nnn` command
+1. Finally use the `ACCEPT` command to save the results
+
+You can cancel the calibration process at any time with `ABORT`.
+
+### LOAD_CELL_TARE
+`LOAD_CELL_TARE [LOAD_CELL=<config_name>]`: This works just like the tare button
+on digital scale. It sets the current raw reading of the load cell to be the
+zero point reference value. The response is the percentage of the sensors range
+that was read and the raw value in counts.
+
+### LOAD_CELL_READ load_cell="name"
+`LOAD_CELL_READ [LOAD_CELL=<config_name>]`:
+This command takes a reading from the load cell. The response is the percentage
+of the sensors range that was read and the raw value in counts. If the load cell
+is calibrated a force in grams is also reported.
+
+
 ### [heaters]
 
 The heaters module is automatically loaded if a heater is defined in
@@ -1251,8 +1279,9 @@ has been enabled.
 
 #### SAVE_VARIABLE
 `SAVE_VARIABLE VARIABLE=<name> VALUE=<value>`: Saves the variable to
-disk so that it can be used across restarts. All stored variables are
-loaded into the `printer.save_variables.variables` dict at startup and
+disk so that it can be used across restarts. The VARIABLE must be lowercase.
+All stored variables are loaded into the
+`printer.save_variables.variables` dict at startup and
 can be used in gcode macros. The provided VALUE is parsed as a Python
 literal.
 
