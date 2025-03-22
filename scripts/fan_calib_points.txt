@@ -1,0 +1,7 @@
+# Relevant corner points for fan speed linearization.
+# PWM-Value: RPM
+70: 315
+140: 600
+190: 1650
+230: 1995
+255: 2005
