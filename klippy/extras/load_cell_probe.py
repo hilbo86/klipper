@@ -360,7 +360,8 @@ class LoadCellProbe:
             # confirm contact with compensated measurement (and update offset)
             force = self._compensated_measurement(gcmd)
             if abs(force) > self._threshold:
-                # stay at slightly z-lifted position without contact when returning
+                # stay at slightly z-lifted position 
+                # without contact when returning
                 gcmd.respond_info("Fast approach found contact.")
                 return force
             # check for failure condition
