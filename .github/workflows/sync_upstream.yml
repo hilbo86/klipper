@@ -1,4 +1,4 @@
-name: Sync Upstream and ForkB
+name: Sync Parent and Grandparent Upstream
 
 on:
   schedule:
