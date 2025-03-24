@@ -31,6 +31,8 @@ jobs:
 
       - name: Merge von upperstream/master und upstream/master in klipper-upstream
         run: |
+          git config --global user.email "syncbot@t-hilbig.de"
+          git config --global user.name "Syncbot"
           # Zuerst werden die Änderungen aus Repository C (upperstream) gemerged
           git merge upperstream/master --no-edit
           # Anschließend werden die Änderungen aus Repository B (upstream) gemerged
