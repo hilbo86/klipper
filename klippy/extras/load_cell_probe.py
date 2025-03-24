@@ -77,7 +77,8 @@ class LoadCellProbe:
         self._report_time = 1.0 / config.getfloat("adc_rate", above=0.0)
 
         # Conversion factor to convert ADC readings into physical units.
-        self._force_calibration = config.getfloat("force_calibration", default=1.0)
+        self._force_calibration = config.getfloat("force_calibration",
+                                                  default=1.0)
 
         # Maximum acceptable force
         self._max_abs_force = config.getfloat("max_abs_force", above=0.0)
@@ -88,7 +89,8 @@ class LoadCellProbe:
 
         # Noise level of force measurements (standard deviation, in physical
         # units)
-        self._noise_level = config.getfloat("noise_level", above=0.0, default=1e-3)
+        self._noise_level = config.getfloat("noise_level", above=0.0,
+                                            default=1e-3)
 
         # From stepper_z section: Distance for one full step
         cfg_stepper_z = config.getsection("stepper_z")
@@ -121,13 +123,15 @@ class LoadCellProbe:
         # that each data point is significantly different from previous data
         # point and the step size is not below a quater step on the z axis
         self._fit_step_size = max(
-            self._fit_threshold / self._stiffness, full_step_distance / FIT_SUB_STEPPING
+            self._fit_threshold / self._stiffness,
+            full_step_distance / FIT_SUB_STEPPING
         )
         if self._fit_step_size < FIT_MIN_STEP_SIZE:
             self._fit_step_size = FIT_MIN_STEP_SIZE
 
         # Distance of Z compensation lift
-        self._compensation_z_lift = self._fit_step_size * COMPENSATION_Z_LIFT_FACTOR
+        self._compensation_z_lift = self._fit_step_size \
+                                    * COMPENSATION_Z_LIFT_FACTOR
 
         # initialise data members
         self._last_z_result = 0.0
@@ -148,10 +152,12 @@ class LoadCellProbe:
 
         # register gcode commands
         self._gcode = self._printer.lookup_object("gcode")
-        self._gcode.register_command("PROBE", self.cmd_PROBE, desc=self.cmd_PROBE_help)
+        self._gcode.register_command("PROBE", self.cmd_PROBE,
+                                     desc=self.cmd_PROBE_help)
 
         self._gcode.register_command(
-            "PROBE_ACCURACY", self.cmd_PROBE_ACCURACY, desc=self.cmd_PROBE_ACCURACY_help
+            "PROBE_ACCURACY", self.cmd_PROBE_ACCURACY,
+            desc=self.cmd_PROBE_ACCURACY_help
         )
 
         self._gcode.register_command(
@@ -159,7 +165,8 @@ class LoadCellProbe:
         )
 
         self._gcode.register_command(
-            "LCP_COMPENSATE", self.cmd_LCP_COMPENSATE, desc=self.cmd_LCP_COMPENSATE_help
+            "LCP_COMPENSATE", self.cmd_LCP_COMPENSATE,
+            desc=self.cmd_LCP_COMPENSATE_help
         )
 
         self._gcode.register_command(
@@ -313,8 +320,8 @@ class LoadCellProbe:
     def _lower_to_threshold(self, gcmd):
         # Lower the tool head until the force threshold is exceeded
         while True:
-            # Check threshold before first movement, to prevent doing an unchecked
-            # step after a retry
+            # Check threshold before first movement, to prevent doing an
+            # unchecked step after a retry
             force = self._read_uncompensated_force(gcmd) - self._force_offset
             gcmd.respond_info(
                 "pos = %f, force = %.1f" % (self.tool.get_position()[2], force)
@@ -343,7 +350,8 @@ class LoadCellProbe:
             # if contact is confirmed with new measurement, terminate fast
             # approach
             if abs(force) > self._threshold:
-                # stay at slightly z-lifted position without contact when returning
+                # stay at slightly z-lifted position
+                # without contact when returning
                 gcmd.respond_info("Fast approach found contact.")
                 return force
 
@@ -353,7 +361,8 @@ class LoadCellProbe:
                 attempt = attempt + 1
                 if attempt > MAX_RETRY:
                     raise gcmd.error(
-                        "Force reading drifting too much, maximum " "retries exceeded."
+                        "Force reading drifting too much, maximum "
+                        "retries exceeded."
                     )
             else:
                 attempt = 0
@@ -382,7 +391,8 @@ class LoadCellProbe:
             if abs(force2) < self._fit_threshold * 2:
                 break
             slope = dist / max(force2 - force1, 1)
-            dist = min(abs((force2 - self._fit_threshold) * slope), self._step_size / 2)
+            dist = min(abs((force2 - self._fit_threshold) * slope),
+                       self._step_size / 2)
             force1 = force2
 
     def _perform_fit(self, gcmd):
@@ -410,7 +420,8 @@ class LoadCellProbe:
             self._move_z_relative(-1 * self._fit_step_size, False)
 
             # abort if moved too far from start position
-            if z_start - self.tool.get_position()[2] > self._compensation_z_lift:
+            if z_start - self.tool.get_position()[2] \
+            > self._compensation_z_lift:
                 gcmd.respond_info("Fit failed, no contact found")
                 return None
 
@@ -420,7 +431,8 @@ class LoadCellProbe:
         m, b, r, sm, sb = mathutil.linear_regression(forces, heights)
 
         gcmd.respond_info(
-            "Fit result: m = %f, b = %f, r = %f, sm = %f, sb = %f" % (m, b, r, sm, sb)
+            "Fit result: m = %f, b = %f, r = %f, sm = %f, \
+            sb = %f" % (m, b, r, sm, sb)
         )
 
         # safety check: r must be big enough
@@ -450,14 +462,16 @@ class LoadCellProbe:
     def cmd_PROBE_ACCURACY(self, gcmd):
         lift_speed = self.get_lift_speed(gcmd)
         sample_count = gcmd.get_int("SAMPLES", 10, minval=1)
-        sample_retract_dist = gcmd.get_float("SAMPLE_RETRACT_DIST", 2.0, above=0.0)
+        sample_retract_dist = gcmd.get_float("SAMPLE_RETRACT_DIST",
+                                             2.0, above=0.0)
 
         pos = self.tool.get_position()
         gcmd.respond_info(
             "PROBE_ACCURACY at X:%.3f Y:%.3f Z:%.3f"
             " (samples=%d retract=%.3f"
             " lift_speed=%.1f)\n"
-            % (pos[0], pos[1], pos[2], sample_count, sample_retract_dist, lift_speed)
+            % (pos[0], pos[1], pos[2], sample_count,
+               sample_retract_dist, lift_speed)
         )
         # Probe bed sample_count times
         self.multi_probe_begin()
@@ -490,7 +504,8 @@ class LoadCellProbe:
     def cmd_PROBE(self, gcmd):
         pos = self.tool.get_position()
 
-        gcmd.respond_info("PROBE at X:%.3f Y:%.3f Z:%.3f\n" % (pos[0], pos[1], pos[2]))
+        gcmd.respond_info("PROBE at X:%.3f Y:%.3f Z:%.3f\n" \
+                          % (pos[0], pos[1], pos[2]))
 
         pos = self.run_probe(gcmd)
         self.tool.manual_move([pos[0], pos[1], pos[2]], SPEED)
@@ -505,7 +520,8 @@ class LoadCellProbe:
 
     def cmd_LCP_COMPENSATE(self, gcmd):
         sample_count = gcmd.get_int("SAMPLES", 10, minval=2)
-        gcmd.respond_info("Determine zero level from %d samples:" % sample_count)
+        gcmd.respond_info("Determine zero level from %d samples:" \
+                          % sample_count)
 
         self._force_offset = 0
         for s in range(0, sample_count):
@@ -515,7 +531,8 @@ class LoadCellProbe:
 
     def cmd_LCP_CALIB_NOISE(self, gcmd):
         sample_count = gcmd.get_int("SAMPLES", 50, minval=2)
-        gcmd.respond_info("Determine noise level from %d samples:" % sample_count)
+        gcmd.respond_info("Determine noise level from %d samples:" \
+                          % sample_count)
 
         samples = []
         for s in range(0, sample_count):
@@ -553,14 +570,17 @@ class LoadCellProbe:
         force -= self._force_offset
 
         if abs(force) < FIT_THRESHOLD_FACTOR * self._noise_level:
-            raise gcmd.error("Measured force too close to noise level: %.6f" % force)
+            raise gcmd.error("Measured force too close to noise level: %.6f" \
+                             % force)
 
         correction_factor = weight / force
         self._force_calibration *= correction_factor
-        gcmd.respond_info("New force_calibration = %.6f:" % self._force_calibration)
+        gcmd.respond_info("New force_calibration = %.6f:" \
+                          % self._force_calibration)
         self._noise_level *= correction_factor
         self._force_offset *= correction_factor
-        self._configfile.set(self._name, "force_calibration", self._force_calibration)
+        self._configfile.set(self._name, "force_calibration",
+                             self._force_calibration)
         self._configfile.set(self._name, "noise_level", self._noise_level)
         gcmd.respond_info(
             "The SAVE_CONFIG command will update the printer\n"
@@ -620,7 +640,8 @@ class LoadCellProbe:
         gcmd.respond_info("step_size = %f" % self._step_size)
         gcmd.respond_info("fit_threshold = %f" % self._fit_threshold)
         gcmd.respond_info("fit_step_size = %f" % self._fit_step_size)
-        gcmd.respond_info("compensation_z_lift = %f" % self._compensation_z_lift)
+        gcmd.respond_info("compensation_z_lift = %f" \
+                          % self._compensation_z_lift)
 
 
 def load_config(config):
