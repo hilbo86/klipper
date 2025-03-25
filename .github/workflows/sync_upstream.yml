@@ -17,25 +17,21 @@ jobs:
 
       - name: Remotes hinzufügen und updaten
         run: |
-          # Remote für Grandparent-Repository hinzufügen
           git remote add upperstream https://github.com/Klipper3d/klipper.git || echo "Remote upperstream existiert bereits"
-          # Remote für Parent-Repository hinzufügen
           git remote add upstream https://github.com/RF1000community/klipper.git || echo "Remote upstream existiert bereits"
-          # Beide Remotes abrufen
           git fetch upperstream
           git fetch upstream
 
-      - name: Branch klipper-upstream auschecken
+      - name: Branch klipper-upstream auschecken und updaten
         run: |
           git checkout -B klipper-upstream
+          git pull origin klipper-upstream || echo "Keine vorherigen Remote-Änderungen vorhanden"
 
       - name: Merge von upperstream/master und upstream/master in klipper-upstream
         run: |
           git config --global user.email "syncbot@t-hilbig.de"
           git config --global user.name "Syncbot"
-          # Zuerst werden die Änderungen aus Repository C (upperstream) gemerged
           git merge upperstream/master --no-edit
-          # Anschließend werden die Änderungen aus Repository B (upstream) gemerged
           git merge upstream/master --no-edit
 
       - name: Änderungen pushen
