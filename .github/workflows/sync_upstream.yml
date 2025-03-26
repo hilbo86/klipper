@@ -10,8 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Repository auschecken
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
+          ref: klipper-upstream
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0  # Vollständige Historie holen
 
@@ -24,12 +25,12 @@ jobs:
 
       - name: Branch klipper-upstream auschecken und updaten
         run: |
-          git checkout -B klipper-upstream
-          git pull origin klipper-upstream || echo "Keine vorherigen Remote-Änderungen vorhanden"
+          git checkout klipper-upstream
+      #    git pull origin klipper-upstream || echo "Keine vorherigen Remote-Änderungen vorhanden"
 
       - name: Merge von upperstream/master und upstream/master in klipper-upstream
         run: |
-          git config --global user.email "syncbot@t-hilbig.de"
+          git config --global user.email "203899805+hilbo86@users.noreply.github.com"
           git config --global user.name "Syncbot"
           git merge upperstream/master --no-edit
           git merge upstream/master --no-edit
