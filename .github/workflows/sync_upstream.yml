@@ -5,6 +5,10 @@ on:
     - cron: '25 3 * * *'   # Täglich um 03:00 Uhr UTC ausführen
   workflow_dispatch:      # Zusätzlich manuell auslösbar
 
+permissions:
+  contents: write
+  actions: write
+
 jobs:
   sync:
     runs-on: ubuntu-latest
