@@ -3569,6 +3569,7 @@ run_current:
 #driver_PWM_FREQ: 1
 #driver_PWM_GRAD: 4
 #driver_PWM_AMPL: 128
+#driver_FREEWHEEL: 0
 #driver_SGT: 0
 #driver_SEMIN: 0
 #driver_SEUP: 0
@@ -3649,6 +3650,7 @@ run_current:
 #driver_PWM_FREQ: 1
 #driver_PWM_GRAD: 14
 #driver_PWM_OFS: 36
+#driver_FREEWHEEL: 0
 #   Set the given register during the configuration of the TMC2208
 #   chip. This may be used to set custom motor parameters. The
 #   defaults for each parameter are next to the parameter name in the
@@ -3698,6 +3700,7 @@ run_current:
 #driver_PWM_FREQ: 1
 #driver_PWM_GRAD: 14
 #driver_PWM_OFS: 36
+#driver_FREEWHEEL: 0
 #driver_SGTHRS: 0
 #driver_SEMIN: 0
 #driver_SEUP: 0
