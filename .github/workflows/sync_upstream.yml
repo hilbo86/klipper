@@ -17,7 +17,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: klipper-upstream
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.WORKFLOW_TOKEN }}
           fetch-depth: 0  # Vollständige Historie holen
 
       - name: Remotes hinzufügen und updaten
