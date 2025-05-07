@@ -31,7 +31,7 @@ The following information is available in the
 ## bed_screws
 
 The following information is available in the
-`Config_Reference.md#bed_screws` object:
+[bed_screws](Config_Reference.md#bed_screws) object:
 - `is_active`: Returns True if the bed screws adjustment tool is currently
 active.
 - `state`: The bed screws adjustment tool state. It is one of
@@ -242,6 +242,8 @@ The following information is available in the `gcode_move` object
 The following information is available in the
 [hall_filament_width_sensor](Config_Reference.md#hall_filament_width_sensor)
 object:
+- all items from
+  [filament_switch_sensor](Status_Reference.md#filament_switch_sensor)
 - `is_active`: Returns True if the sensor is currently active.
 - `Diameter`: The last reading from the sensor in mm.
 - `Raw`: The last raw ADC reading from the sensor.
@@ -581,6 +583,12 @@ on a cartesian, hybrid_corexy or hybrid_corexz robot
   "INACTIVE" and "PRIMARY".
 - `carriage_1`: The mode of the carriage 1. Possible values are:
   "INACTIVE", "PRIMARY", "COPY", and "MIRROR".
+
+On a `generic_cartesian` kinematic, the following information is
+available in `dual_carriage`:
+- `carriages["<carriage>"]`: The mode of the carriage `<carriage>`. Possible
+  values are "INACTIVE" and "PRIMARY" for the primary carriage and "INACTIVE",
+  "PRIMARY", "COPY", and "MIRROR" for the dual carriage.
 
 ## virtual_sdcard
 
