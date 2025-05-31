@@ -201,6 +201,15 @@ class PressurePriming:
             pheaters = self.printer.lookup_object('heaters')
             pheaters.set_temperature(extr.get_heater(), self.reset_ttemp)
 
+        self.force_protocol = [[]]
+        self.mean_force = []
+        self.loop = 0
+        self.force_delta = []
+        self.primed = False
+        self.threshold_reached = False
+        self.overpressure = False
+        self.reset_ttemp = None
+
 
 def load_config(config):
     return PressurePriming(config)
