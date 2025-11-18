@@ -108,8 +108,8 @@ class MCU_ADS1100:
         self._sample_timer = self._reactor.register_timer(self._handle_timer,
             self._reactor.NOW)
         
-        def  _handle_ready(self):
-            self._reactor.register_callback(self._handle_do_ready)
+    def _handle_ready(self):
+        self._reactor.register_callback(self._handle_do_ready)
 
 
     def _read_response(self):
