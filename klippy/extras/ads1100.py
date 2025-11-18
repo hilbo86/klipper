@@ -95,7 +95,7 @@ class MCU_ADS1100:
         self._norm = float(ADS1100_MAXVALUE_BY_RATE_TABLE[rate])
 
 
-    def _handle_ready(self):
+    def _handle_do_ready(self, eventtime):
         # configuration byte: continuous conversion (SC bit not set), selected
         # gain and SPS
         config = ADS1100_SAMPLE_RATE_TABLE[self._rate] << 2 \
@@ -107,6 +107,9 @@ class MCU_ADS1100:
         # setup readout timer
         self._sample_timer = self._reactor.register_timer(self._handle_timer,
             self._reactor.NOW)
+        
+        def  _handle_ready(self):
+            self._reactor.register_callback(self._handle_do_ready)
 
 
     def _read_response(self):
