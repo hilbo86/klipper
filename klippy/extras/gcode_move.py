@@ -32,6 +32,8 @@ class GCodeMove:
         self.homing_position = [0.0, 0.0, 0.0, 0.0]
         self.axis_map = {'X':0, 'Y': 1, 'Z': 2, 'E': 3}
         self.speed = 25.
+        self.speed_g0 = self.speed_g1 = 25.
+        self.last_move_mode = None
         self.speed_factor = 1. / 60.
         self.extrude_factor = 1.
         # G-Code state
@@ -96,7 +98,7 @@ class GCodeMove:
         p[3] /= self.extrude_factor
         return p[:4]
     def _get_gcode_speed(self):
-        return self.speed / self.speed_factor
+        return self.speed_g1 / self.speed_factor
     def _get_gcode_speed_override(self):
         return self.speed_factor * 60.
     def get_status(self, eventtime=None):
@@ -134,6 +136,7 @@ class GCodeMove:
     def cmd_G1(self, gcmd):
         # Move
         params = gcmd.get_command_parameters()
+        cmd = gcmd.get_command()
         try:
             for axis, pos in self.axis_map.items():
                 if axis in params:
@@ -154,7 +157,16 @@ class GCodeMove:
                 if gcode_speed <= 0.:
                     raise gcmd.error("Invalid speed in '%s'"
                                      % (gcmd.get_commandline(),))
-                self.speed = gcode_speed * self.speed_factor
+                if cmd == 'G1':
+                    self.speed = gcode_speed * self.speed_factor
+                    self.speed_g1 = self.speed
+                else:
+                    self.speed = gcode_speed
+                    self.speed_g0 = self.speed
+                self.last_move_mode = cmd
+            elif cmd != self.last_move_mode:
+                self.last_move_mode = cmd
+                self.speed = self.speed_g1 if cmd == 'G1' else self.speed_g
         except ValueError as e:
             raise gcmd.error("Unable to parse move '%s'"
                              % (gcmd.get_commandline(),))
@@ -195,7 +207,9 @@ class GCodeMove:
     def cmd_M220(self, gcmd):
         # Set speed factor override percentage
         value = gcmd.get_float('S', 100., above=0.) / (60. * 100.)
-        self.speed = self._get_gcode_speed() * value
+        self.speed_g1 = self._get_gcode_speed() * value
+        if self.last_move_mode == 'G1':
+            self.speed = self.speed_g1
         self.speed_factor = value
     def cmd_M221(self, gcmd):
         # Set extrude factor override percentage
