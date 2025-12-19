@@ -166,7 +166,7 @@ class GCodeMove:
                 self.last_move_mode = cmd
             elif cmd != self.last_move_mode:
                 self.last_move_mode = cmd
-                self.speed = self.speed_g1 if cmd == 'G1' else self.speed_g
+                self.speed = self.speed_g1 if cmd == 'G1' else self.speed_g0
         except ValueError as e:
             raise gcmd.error("Unable to parse move '%s'"
                              % (gcmd.get_commandline(),))
