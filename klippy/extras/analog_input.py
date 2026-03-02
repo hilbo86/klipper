@@ -45,12 +45,13 @@ class PrinterAnalogInput:
         printer = config.get_printer()
         ppins = printer.lookup_object("pins")
         self.mcu_adc = ppins.setup_pin("adc", config.get("sensor_pin"))
-        self.mcu_adc.setup_adc_callback(REPORT_TIME, self.adc_callback)
-        self.mcu_adc.setup_adc_sample(SAMPLE_TIME, SAMPLE_COUNT)
+        self.mcu_adc.setup_adc_callback(self.adc_callback)
+        self.mcu_adc.setup_adc_sample(REPORT_TIME, SAMPLE_TIME, SAMPLE_COUNT)
         query_adc = printer.load_object(config, "query_adc")
         query_adc.register_adc(self.name, self.mcu_adc)
 
-    def adc_callback(self, read_time, read_value):
+    def adc_callback(self, samples):
+        read_time, read_value = samples[-1]
         value = read_value * self.scale + self.offset
         for helper in self._limit_helpers:
             helper.callback(read_time, value, self.last_value)
