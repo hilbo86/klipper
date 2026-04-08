@@ -15,14 +15,12 @@
 // efficiency - the repetitive integer math is vastly faster in C.
 
 #include <math.h> // sqrt
-#include <pthread.h> // pthread_mutex_lock
 #include <stddef.h> // offsetof
 #include <stdint.h> // uint32_t
 #include <stdio.h> // fprintf
 #include <stdlib.h> // malloc
 #include <string.h> // memset
 #include "compiler.h" // DIV_ROUND_UP
-#include "itersolve.h" // itersolve_generate_steps
 #include "pyhelper.h" // errorf
 #include "serialqueue.h" // struct queue_message
 #include "stepcompress.h" // stepcompress_alloc
@@ -30,15 +28,22 @@
 #define CHECK_LINES 1
 #define QUEUE_START_SIZE 1024
 
+// Storage for queuing steps (only lower 32 bits of step clock are stored as
+// optimization to reduce memory, improve cache usage, and reduce 64 bit ops)
+struct qstep {
+    uint32_t clock32;
+};
+
+// Main stepcompress object storage
 struct stepcompress {
     // Buffer management
-    uint32_t *queue, *queue_end, *queue_pos, *queue_next;
+    struct qstep *queue, *queue_end, *queue_pos, *queue_next;
     // Internal tracking
     uint32_t max_error;
     double mcu_time_offset, mcu_freq, last_step_print_time;
     // Message generation
     uint64_t last_step_clock;
-    struct list_head msg_queue;
+    struct list_head *msg_queue;
     uint32_t oid;
     int32_t queue_step_msgtag, set_next_step_dir_msgtag;
     int sdir, invert_sdir;
@@ -48,24 +53,16 @@ struct stepcompress {
     // History tracking
     int64_t last_position;
     struct list_head history_list;
-    // Thread for step generation
-    struct stepper_kinematics *sk;
-    char name[16];
-    pthread_t tid;
-    pthread_mutex_t lock; // protects variables below
-    pthread_cond_t cond;
-    int have_work;
-    double bg_gen_steps_time;
-    uint64_t bg_flush_clock;
-    int32_t bg_result;
 };
 
+// Parameters of a single queue_step command
 struct step_move {
     uint32_t interval;
     uint16_t count;
     int16_t add;
 };
 
+// Storage for internal history of recently sent queue_step commands
 struct history_steps {
     struct list_node node;
     uint64_t first_clock, last_clock;
@@ -97,10 +94,10 @@ struct points {
 // Given a requested step time, return the minimum and maximum
 // acceptable times
 static inline struct points
-minmax_point(struct stepcompress *sc, uint32_t *pos)
+minmax_point(struct stepcompress *sc, struct qstep *pos)
 {
-    uint32_t lsc = sc->last_step_clock, point = *pos - lsc;
-    uint32_t prevpoint = pos > sc->queue_pos ? *(pos-1) - lsc : 0;
+    uint32_t lsc = sc->last_step_clock, point = pos->clock32 - lsc;
+    uint32_t prevpoint = pos > sc->queue_pos ? (pos-1)->clock32 - lsc : 0;
     uint32_t max_error = (point - prevpoint) / 2;
     if (max_error > sc->max_error)
         max_error = sc->max_error;
@@ -117,7 +114,7 @@ minmax_point(struct stepcompress *sc, uint32_t *pos)
 static struct step_move
 compress_bisect_add(struct stepcompress *sc)
 {
-    uint32_t *qlast = sc->queue_next;
+    struct qstep *qlast = sc->queue_next;
     if (qlast > sc->queue_pos + 65535)
         qlast = sc->queue_pos + 65535;
     struct points point = minmax_point(sc, sc->queue_pos);
@@ -253,31 +250,24 @@ check_line(struct stepcompress *sc, struct step_move move)
  * Step compress interface
  ****************************************************************/
 
-static int sc_thread_alloc(struct stepcompress *sc, char name[16]);
-static void sc_thread_free(struct stepcompress *sc);
-
 // Allocate a new 'stepcompress' object
-struct stepcompress * __visible
-stepcompress_alloc(uint32_t oid, char name[16])
+struct stepcompress *
+stepcompress_alloc(struct list_head *msg_queue)
 {
     struct stepcompress *sc = malloc(sizeof(*sc));
     memset(sc, 0, sizeof(*sc));
-    list_init(&sc->msg_queue);
     list_init(&sc->history_list);
-    sc->oid = oid;
     sc->sdir = -1;
-
-    int ret = sc_thread_alloc(sc, name);
-    if (ret)
-        return NULL;
+    sc->msg_queue = msg_queue;
     return sc;
 }
 
 // Fill message id information
 void __visible
-stepcompress_fill(struct stepcompress *sc, uint32_t max_error
+stepcompress_fill(struct stepcompress *sc, uint32_t oid, uint32_t max_error
                   , int32_t queue_step_msgtag, int32_t set_next_step_dir_msgtag)
 {
+    sc->oid = oid;
     sc->max_error = max_error;
     sc->queue_step_msgtag = queue_step_msgtag;
     sc->set_next_step_dir_msgtag = set_next_step_dir_msgtag;
@@ -310,14 +300,12 @@ stepcompress_history_expire(struct stepcompress *sc, uint64_t end_clock)
 }
 
 // Free memory associated with a 'stepcompress' object
-void __visible
+void
 stepcompress_free(struct stepcompress *sc)
 {
     if (!sc)
         return;
-    sc_thread_free(sc);
     free(sc->queue);
-    message_queue_free(&sc->msg_queue);
     stepcompress_history_expire(sc, UINT64_MAX);
     free(sc);
 }
@@ -332,12 +320,6 @@ int
 stepcompress_get_step_dir(struct stepcompress *sc)
 {
     return sc->next_step_dir;
-}
-
-struct list_head *
-stepcompress_get_msg_queue(struct stepcompress *sc)
-{
-    return &sc->msg_queue;
 }
 
 // Determine the "print time" of the last_step_clock
@@ -377,7 +359,7 @@ add_move(struct stepcompress *sc, uint64_t first_clock, struct step_move *move)
     qm->min_clock = qm->req_clock = sc->last_step_clock;
     if (move->count == 1 && first_clock >= sc->last_step_clock + CLOCK_DIFF_MAX)
         qm->req_clock = first_clock;
-    list_add_tail(&qm->node, &sc->msg_queue);
+    list_add_tail(&qm->node, sc->msg_queue);
     sc->last_step_clock = last_clock;
 
     // Create and store move in history tracking
@@ -441,7 +423,7 @@ set_next_step_dir(struct stepcompress *sc, int sdir)
     };
     struct queue_message *qm = message_alloc_and_encode(msg, 3);
     qm->req_clock = sc->last_step_clock;
-    list_add_tail(&qm->node, &sc->msg_queue);
+    list_add_tail(&qm->node, sc->msg_queue);
     return 0;
 }
 
@@ -456,7 +438,8 @@ queue_append_far(struct stepcompress *sc)
         return ret;
     if (step_clock >= sc->last_step_clock + CLOCK_DIFF_MAX)
         return stepcompress_flush_far(sc, step_clock);
-    *sc->queue_next++ = step_clock;
+    sc->queue_next->clock32 = step_clock;
+    sc->queue_next++;
     return 0;
 }
 
@@ -466,7 +449,7 @@ queue_append_extend(struct stepcompress *sc)
 {
     if (sc->queue_next - sc->queue_pos > 65535 + 2000) {
         // No point in keeping more than 64K steps in memory
-        uint32_t flush = (*(sc->queue_next-65535)
+        uint32_t flush = ((sc->queue_next-65535)->clock32
                           - (uint32_t)sc->last_step_clock);
         int ret = queue_flush(sc, sc->last_step_clock + flush);
         if (ret)
@@ -493,7 +476,8 @@ queue_append_extend(struct stepcompress *sc)
         sc->queue_next = sc->queue + in_use;
     }
 
-    *sc->queue_next++ = sc->next_step_clock;
+    sc->queue_next->clock32 = sc->next_step_clock;
+    sc->queue_next++;
     sc->next_step_clock = 0;
     return 0;
 }
@@ -511,7 +495,8 @@ queue_append(struct stepcompress *sc)
         return queue_append_far(sc);
     if (unlikely(sc->queue_next >= sc->queue_end))
         return queue_append_extend(sc);
-    *sc->queue_next++ = sc->next_step_clock;
+    sc->queue_next->clock32 = sc->next_step_clock;
+    sc->queue_next++;
     sc->next_step_clock = 0;
     return 0;
 }
@@ -558,7 +543,7 @@ stepcompress_commit(struct stepcompress *sc)
 }
 
 // Flush pending steps
-static int
+int
 stepcompress_flush(struct stepcompress *sc, uint64_t move_clock)
 {
     if (sc->next_step_clock && move_clock >= sc->next_step_clock) {
@@ -630,35 +615,6 @@ stepcompress_find_past_position(struct stepcompress *sc, uint64_t clock)
     return last_position;
 }
 
-// Queue an mcu command to go out in order with stepper commands
-int __visible
-stepcompress_queue_msg(struct stepcompress *sc, uint32_t *data, int len)
-{
-    int ret = stepcompress_flush(sc, UINT64_MAX);
-    if (ret)
-        return ret;
-
-    struct queue_message *qm = message_alloc_and_encode(data, len);
-    qm->req_clock = sc->last_step_clock;
-    list_add_tail(&qm->node, &sc->msg_queue);
-    return 0;
-}
-
-// Queue an mcu command that will consume space in the mcu move queue
-int __visible
-stepcompress_queue_mq_msg(struct stepcompress *sc, uint64_t req_clock
-                          , uint32_t *data, int len)
-{
-    int ret = stepcompress_flush(sc, UINT64_MAX);
-    if (ret)
-        return ret;
-
-    struct queue_message *qm = message_alloc_and_encode(data, len);
-    qm->min_clock = qm->req_clock = req_clock;
-    list_add_tail(&qm->node, &sc->msg_queue);
-    return 0;
-}
-
 // Return history of queue_step commands
 int __visible
 stepcompress_extract_old(struct stepcompress *sc, struct pull_history_steps *p
@@ -681,132 +637,4 @@ stepcompress_extract_old(struct stepcompress *sc, struct pull_history_steps *p
         res++;
     }
     return res;
-}
-
-
-/****************************************************************
- * Step generation thread
- ****************************************************************/
-
-// Store a reference to stepper_kinematics
-void __visible
-stepcompress_set_stepper_kinematics(struct stepcompress *sc
-                                    , struct stepper_kinematics *sk)
-{
-    sc->sk = sk;
-}
-
-// Report current stepper_kinematics
-struct stepper_kinematics * __visible
-stepcompress_get_stepper_kinematics(struct stepcompress *sc)
-{
-    return sc->sk;
-}
-
-// Generate steps (via itersolve) and flush
-static int32_t
-stepcompress_generate_steps(struct stepcompress *sc, double gen_steps_time
-                            , uint64_t flush_clock)
-{
-    if (!sc->sk)
-        return 0;
-    // Generate steps
-    int32_t ret = itersolve_generate_steps(sc->sk, sc, gen_steps_time);
-    if (ret)
-        return ret;
-    // Flush steps
-    return stepcompress_flush(sc, flush_clock);
-}
-
-// Main background thread for generating steps
-static void *
-sc_background_thread(void *data)
-{
-    struct stepcompress *sc = data;
-    set_thread_name(sc->name);
-
-    pthread_mutex_lock(&sc->lock);
-    for (;;) {
-        if (!sc->have_work) {
-            pthread_cond_wait(&sc->cond, &sc->lock);
-            continue;
-        }
-        if (sc->have_work < 0)
-            // Exit request
-            break;
-
-        // Request to generate steps
-        sc->bg_result = stepcompress_generate_steps(sc, sc->bg_gen_steps_time
-                                                    , sc->bg_flush_clock);
-        sc->have_work = 0;
-        pthread_cond_signal(&sc->cond);
-    }
-    pthread_mutex_unlock(&sc->lock);
-
-    return NULL;
-}
-
-// Signal background thread to start step generation
-void
-stepcompress_start_gen_steps(struct stepcompress *sc, double gen_steps_time
-                             , uint64_t flush_clock)
-{
-    if (!sc->sk)
-        return;
-    pthread_mutex_lock(&sc->lock);
-    while (sc->have_work)
-        pthread_cond_wait(&sc->cond, &sc->lock);
-    sc->bg_gen_steps_time = gen_steps_time;
-    sc->bg_flush_clock = flush_clock;
-    sc->have_work = 1;
-    pthread_mutex_unlock(&sc->lock);
-    pthread_cond_signal(&sc->cond);
-}
-
-// Wait for background thread to complete last step generation request
-int32_t
-stepcompress_finalize_gen_steps(struct stepcompress *sc)
-{
-    pthread_mutex_lock(&sc->lock);
-    while (sc->have_work)
-        pthread_cond_wait(&sc->cond, &sc->lock);
-    int32_t res = sc->bg_result;
-    pthread_mutex_unlock(&sc->lock);
-    return res;
-}
-
-// Internal helper to start thread
-static int
-sc_thread_alloc(struct stepcompress *sc, char name[16])
-{
-    strncpy(sc->name, name, sizeof(sc->name));
-    sc->name[sizeof(sc->name)-1] = '\0';
-    int ret = pthread_mutex_init(&sc->lock, NULL);
-    if (ret)
-        goto fail;
-    ret = pthread_cond_init(&sc->cond, NULL);
-    if (ret)
-        goto fail;
-    ret = pthread_create(&sc->tid, NULL, sc_background_thread, sc);
-    if (ret)
-        goto fail;
-    return 0;
-fail:
-    report_errno("sc init", ret);
-    return -1;
-}
-
-// Request background thread to exit
-static void
-sc_thread_free(struct stepcompress *sc)
-{
-    pthread_mutex_lock(&sc->lock);
-    while (sc->have_work)
-        pthread_cond_wait(&sc->cond, &sc->lock);
-    sc->have_work = -1;
-    pthread_cond_signal(&sc->cond);
-    pthread_mutex_unlock(&sc->lock);
-    int ret = pthread_join(sc->tid, NULL);
-    if (ret)
-        report_errno("sc pthread_join", ret);
 }
