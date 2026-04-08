@@ -284,11 +284,15 @@ config CANBUS_FILTER
     default y if CANSERIAL
 
 # Stepper optimizations
+config HAVE_STEPPER
+    bool
+    depends on HAVE_GPIO
+    default y if !HAVE_LIMITED_CODE_SIZE
 config INLINE_STEPPER_HACK
     # Enables gcc to inline stepper_event() into the main timer irq handler
     bool
     depends on HAVE_GPIO
-    default y
+    default y if !HAVE_LIMITED_CODE_SIZE
 config HAVE_STEPPER_OPTIMIZED_BOTH_EDGE
     bool
 config WANT_STEPPER_OPTIMIZED_BOTH_EDGE
