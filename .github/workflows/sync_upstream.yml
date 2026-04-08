@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Repository auschecken
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: klipper-upstream
           token: ${{ secrets.WORKFLOW_TOKEN }}
@@ -23,21 +23,21 @@ jobs:
       - name: Remotes hinzufügen und updaten
         run: |
           git remote add upperstream https://github.com/Klipper3d/klipper.git || echo "Remote upperstream existiert bereits"
-          git remote add upstream https://github.com/RF1000community/klipper.git || echo "Remote upstream existiert bereits"
+          # git remote add upstream https://github.com/RF1000community/klipper.git || echo "Remote upstream existiert bereits"
           git fetch upperstream
-          git fetch upstream
+          # git fetch upstream
 
       - name: Branch klipper-upstream auschecken und updaten
         run: |
           git checkout klipper-upstream
       #    git pull origin klipper-upstream || echo "Keine vorherigen Remote-Änderungen vorhanden"
 
-      - name: Merge von upperstream/master und upstream/master in klipper-upstream
+      - name: Merge von upperstream/master (nicht mehr: und upstream/master) in klipper-upstream
         run: |
           git config --global user.email "203899805+hilbo86@users.noreply.github.com"
           git config --global user.name "Syncbot"
           git merge upperstream/master --no-edit
-          git merge upstream/master --no-edit
+#          git merge upstream/master --no-edit
 
       - name: Änderungen pushen
         run: |
