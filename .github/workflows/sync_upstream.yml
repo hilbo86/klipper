@@ -32,7 +32,7 @@ jobs:
           git checkout klipper-upstream
       #    git pull origin klipper-upstream || echo "Keine vorherigen Remote-Änderungen vorhanden"
 
-      - name: Merge von upperstream/master (nicht mehr: und upstream/master) in klipper-upstream
+      - name: Merge von upperstream/master in klipper-upstream
         run: |
           git config --global user.email "203899805+hilbo86@users.noreply.github.com"
           git config --global user.name "Syncbot"
