@@ -5,12 +5,13 @@
 # <martin@hierholzer.info>
 #
 # Modified to fit line length limit and switched to f-Strings
-# Copyright (C) 2025 Timo Hilbig
+# Moved module specific math helper functions here to avoid
+# customized mathutil.py
+# Copyright (C) 2025-2026 Timo Hilbig
 # <gh@t-hilbig.de>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
-import mathutil
 import sys
 import logging
 import random
@@ -60,6 +61,89 @@ FIT_MIN_STEP_SIZE = 0.01
 # Number of retries if fit fails (due to FIT_MIN_QUALITY)
 MAX_RETRY = 5
 
+######################################################################
+# Helper functions - extracted from customized mathutil.py
+# to keep mathutil in sync with mainline klipper
+######################################################################
+
+
+######################################################################
+# Simple statistics
+######################################################################
+
+# Standard deviation (square-root of variance) of the given samples
+def std(samples) :
+    mean = 0.
+    for v in samples :
+      mean += v/float(len(samples))
+    variance = 0.
+    for v in samples :
+      variance += (v-mean)**2
+    return math.sqrt(variance)
+
+######################################################################
+# Linear regression helper function
+######################################################################
+
+def linear_regression(X, Y, extra_err=0):
+
+    def mean(Xs):
+        return sum(Xs) / len(Xs)
+
+    def std(Xs, m):
+        normalizer = len(Xs) - 1
+        return math.sqrt(sum((pow(x - m, 2) for x in Xs)) / normalizer)
+
+    sum_xy = 0
+    sum_sq_v_x = 0
+    sum_sq_v_y = 0
+    sum_sq_x = 0
+
+    m_X = mean(X)
+    m_Y = mean(Y)
+
+    for (x, y) in zip(X, Y):
+        var_x = x - m_X
+        var_y = y - m_Y
+        sum_xy += var_x * var_y
+        sum_sq_v_x += pow(var_x, 2)
+        sum_sq_v_y += pow(var_y, 2)
+        sum_sq_x += pow(x, 2)
+
+    # Number of data points
+    n = len(X)
+
+    # Pearson R
+    r = sum_xy / math.sqrt(sum_sq_v_x * sum_sq_v_y)
+
+    # Slope
+    m = r * (std(Y, m_Y) / std(X, m_X))
+
+    # Intercept
+    b = m_Y - m * m_X
+
+    # Estimate measurement error from resuduals
+    sum_res_sq = 0
+    for (x, y) in zip(X, Y):
+        res = m*x + b - y + extra_err
+        sum_res_sq += pow(res,2)
+
+    # Error on slope
+    if n > 2 and sum_res_sq > 0 :
+      sm = math.sqrt(1./(n-2) * sum_res_sq / sum_sq_v_x)
+    elif sum_res_sq > 0 :
+      sm = math.sqrt(sum_res_sq / sum_sq_v_x)
+    else :
+      sm = 0
+
+    # Error on intercept
+    sb = sm * math.sqrt(1./n * sum_sq_x)
+
+    return [m,b,r,sm,sb]
+    
+######################################################################
+# Load Cell Probe class
+######################################################################
 
 class LoadCellProbe:
     def __init__(self, config):
@@ -423,7 +507,7 @@ class LoadCellProbe:
                 return None
         heights = [d[0] for d in data]
         forces = [d[1] for d in data]
-        m, b, r, sm, sb = mathutil.linear_regression(forces, heights)
+        m, b, r, sm, sb = linear_regression(forces, heights)
         gcmd.respond_info(
             f"Fit result: m = {m:.6f}, b = {b:.6f}, r = {r:.6f}, "
             f"sm = {sm:.6f}, sb = {sb:.6f}"
@@ -518,7 +602,7 @@ class LoadCellProbe:
         samples = []
         for s in range(sample_count):
             samples.append(self._read_uncompensated_force(gcmd))
-        noise_level = mathutil.std(samples)
+        noise_level = std(samples)
         if noise_level == 0:
             raise gcmd.error(
                 "Noise level is 0. Please set noise level manually to the "
@@ -584,7 +668,7 @@ class LoadCellProbe:
         if npt >= 2:
             heights = [d[0] for d in self._stiffness_points]
             forces = [d[1] for d in self._stiffness_points]
-            m, b, r, sm, sb = mathutil.linear_regression(forces, heights)
+            m, b, r, sm, sb = linear_regression(forces, heights)
             self._stiffness = 1.0 / m
             self._configfile.set(self._name, "stiffness", self._stiffness)
             gcmd.respond_info(f"Stiffness updated: {self._stiffness:.6f}")
