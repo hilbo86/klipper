@@ -65,10 +65,13 @@ class LoadCellFilament:
             "unload_preload_step", 0.25, above=0.0
         )
         self.unload_control_step = config.getfloat(
-            "unload_control_step", 0.15, above=0.0
+            "unload_control_step", 0.10, above=0.0
+        )
+        self.unload_probe_step = config.getfloat(
+            "unload_probe_step", 0.05, above=0.0
         )
         self.unload_preload_max = config.getfloat(
-            "unload_preload_max", 8.0, above=0.0
+            "unload_preload_max", 10.0, above=0.0
         )
         self.unload_control_speed = config.getfloat(
             "unload_control_speed", 1.0, above=0.0
@@ -105,7 +108,10 @@ class LoadCellFilament:
             "load_seek_max_length", 120.0, above=0.0
         )
         self.load_control_step = config.getfloat(
-            "load_control_step", 0.15, above=0.0
+            "load_control_step", 0.10, above=0.0
+        )
+        self.load_probe_step = config.getfloat(
+            "load_probe_step", 0.05, above=0.0
         )
         self.load_feed_step = config.getfloat(
             "load_feed_step", 1.0, above=0.0
@@ -118,6 +124,9 @@ class LoadCellFilament:
         )
         self.restore_load_temperature = config.getboolean(
             "restore_load_temperature", True
+        )
+        self.status_interval = config.getfloat(
+            "status_interval", 2.0, above=0.0
         )
 
         self.running = False
@@ -248,6 +257,17 @@ class LoadCellFilament:
             self._set_temperature(extr, new_target, wait=False)
         return new_target
 
+    def _maybe_ramp_temperature(self, extr, set_temp, max_temp,
+                                next_temp_step, now):
+        """Apply at most one configured temperature step when it is due."""
+        if now < next_temp_step or set_temp >= max_temp:
+            return set_temp, next_temp_step
+        set_temp = self._ramp_temperature(extr, set_temp, max_temp)
+        return set_temp, now + self.temp_step_time
+
+    def _status_due(self, now, next_status):
+        return now >= next_status
+
     def _begin_operation(self, gcmd, extr_name):
         if self.running:
             raise gcmd.error("A load-cell filament operation is already running")
@@ -348,6 +368,7 @@ class LoadCellFilament:
             # sustained filament motion while the requested force remains held.
             set_temp = start_temp
             next_temp_step = self.reactor.monotonic() + self.temp_step_time
+            next_status = self.reactor.monotonic()
             prev_force = self._read_force()
             max_temp_since = None
             released = False
@@ -369,9 +390,16 @@ class LoadCellFilament:
                 elif (moved_since_preload >= self.unload_release_motion
                       and actual_temp >= start_temp + 5.0):
                     released = True
-                    reason = "sustained pull %.2fmm" % (moved_since_preload,)
+                    reason = "net pull %.2fmm" % (moved_since_preload,)
                 else:
                     reason = None
+
+                if self._status_due(now, next_status):
+                    gcmd.respond_info(
+                        "UNLOAD heat: T=%.1f/%.1fC F=%.0f E=%.2fmm"
+                        % (actual_temp, set_temp, force, moved_since_preload)
+                    )
+                    next_status = now + self.status_interval
 
                 if released:
                     gcmd.respond_info(
@@ -380,12 +408,13 @@ class LoadCellFilament:
                     )
                     break
 
-                if now >= next_temp_step and set_temp < max_temp:
-                    set_temp = self._ramp_temperature(extr, set_temp, max_temp)
-                    next_temp_step = now + self.temp_step_time
+                set_temp, next_temp_step = self._maybe_ramp_temperature(
+                    extr, set_temp, max_temp, next_temp_step, now
+                )
 
-                # Force controller: retract to increase tension, feed a small
-                # amount forward if tension overshoots.
+                # Closed-loop tension control with deliberate creep.  Without
+                # the probe move in the dead band a static elastic preload can
+                # remain indefinitely even after the filament has softened.
                 if force > target_force + self.unload_force_tolerance:
                     self._move_e(
                         gcmd, extr, -self.unload_control_step,
@@ -394,6 +423,11 @@ class LoadCellFilament:
                 elif force < target_force - self.unload_force_tolerance:
                     self._move_e(
                         gcmd, extr, self.unload_control_step * 0.5,
+                        self.unload_control_speed
+                    )
+                else:
+                    self._move_e(
+                        gcmd, extr, -self.unload_probe_step,
                         self.unload_control_speed
                     )
 
@@ -543,25 +577,35 @@ class LoadCellFilament:
             # The normal temperature ramp stops once 3mm net feed is achieved.
             set_temp = start_temp
             next_temp_step = self.reactor.monotonic() + self.temp_step_time
+            next_status = self.reactor.monotonic()
             max_temp_since = None
 
-            while self.tool.get_position()[3] - load_zero_e < self.load_heat_hold_length:
+            while (self.tool.get_position()[3] - load_zero_e
+                   < self.load_heat_hold_length):
                 self._check_timeout(gcmd, deadline)
                 now = self.reactor.monotonic()
                 force = self._read_force()
                 self._check_force(gcmd, force)
+                progress = self.tool.get_position()[3] - load_zero_e
+                actual_temp = self._temperature(extr)
 
-                if now >= next_temp_step and set_temp < max_temp:
-                    set_temp = self._ramp_temperature(extr, set_temp, max_temp)
-                    next_temp_step = now + self.temp_step_time
+                set_temp, next_temp_step = self._maybe_ramp_temperature(
+                    extr, set_temp, max_temp, next_temp_step, now
+                )
+
+                if self._status_due(now, next_status):
+                    gcmd.respond_info(
+                        "LOAD heat: T=%.1f/%.1fC F=%.0f E=%.2fmm"
+                        % (actual_temp, set_temp, force, progress)
+                    )
+                    next_status = now + self.status_interval
 
                 if force > overforce:
-                    # High force: add heat immediately and do not push harder
-                    # until the load has relaxed.
-                    if set_temp < max_temp:
-                        set_temp = self._ramp_temperature(extr, set_temp, max_temp)
-                    self.reactor.pause(
-                        self.reactor.monotonic() + self.sample_time
+                    # Relieve excessive compression.  Temperature may continue
+                    # to rise, but only through the normal timed ramp above.
+                    self._move_e(
+                        gcmd, extr, -self.load_control_step,
+                        max_e_speed * self.load_min_feed_factor
                     )
                 elif force < target_force - self.load_force_tolerance:
                     self._move_e(
@@ -572,8 +616,15 @@ class LoadCellFilament:
                         gcmd, extr, -self.load_control_step * 0.5,
                         max_e_speed * self.load_min_feed_factor
                     )
+                else:
+                    # Deliberate creep in the force dead band.  A rigid plug
+                    # pushes the force back up; softened filament permits net
+                    # forward motion and the 3mm progress criterion can complete.
+                    self._move_e(
+                        gcmd, extr, self.load_probe_step,
+                        max_e_speed * self.load_min_feed_factor
+                    )
 
-                actual_temp = self._temperature(extr)
                 if set_temp >= max_temp - 1.0e-6:
                     if actual_temp >= max_temp - 2.0:
                         if max_temp_since is None:
@@ -593,39 +644,54 @@ class LoadCellFilament:
             # Phase 4: Feed to 50mm total.  Temperature remains at the reached
             # target unless force exceeds OVERFORCE.  Feed speed is continuously
             # reduced as force approaches OVERFORCE and never exceeds FLOW.
-            previous_force = self._read_force()
             overforce_since = None
+            next_status = self.reactor.monotonic()
+            # Normal heating stopped at 3mm.  Keep the old ramp deadline so
+            # overforce heating can still increase at no more than the configured
+            # temperature_step / temperature_step_time.
+            next_temp_step = max(
+                next_temp_step, self.reactor.monotonic() + self.temp_step_time
+            )
 
             while self.tool.get_position()[3] - load_zero_e < total_length:
                 self._check_timeout(gcmd, deadline)
+                now = self.reactor.monotonic()
                 force = self._read_force()
                 self._check_force(gcmd, force)
                 progress = self.tool.get_position()[3] - load_zero_e
                 remaining = total_length - progress
+                actual_temp = self._temperature(extr)
+
+                if self._status_due(now, next_status):
+                    gcmd.respond_info(
+                        "LOAD feed: T=%.1f/%.1fC F=%.0f E=%.2f/%.2fmm"
+                        % (actual_temp, set_temp, force, progress, total_length)
+                    )
+                    next_status = now + self.status_interval
 
                 if force > overforce:
-                    if set_temp < max_temp:
-                        set_temp = self._ramp_temperature(extr, set_temp, max_temp)
+                    # Raise temperature only at the configured ramp rate, and
+                    # keep creeping forward at the minimum rate.  This avoids
+                    # the previous deadlock where a static high force could stop
+                    # all extrusion indefinitely.
+                    set_temp, next_temp_step = self._maybe_ramp_temperature(
+                        extr, set_temp, max_temp, next_temp_step, now
+                    )
                     if overforce_since is None:
-                        overforce_since = self.reactor.monotonic()
+                        overforce_since = now
 
-                    # If force is still rising, pause rather than pushing into
-                    # a blockage.  If it is already relaxing, feed only a very
-                    # small amount at the minimum speed.
-                    if force >= previous_force:
-                        self.reactor.pause(
-                            self.reactor.monotonic() + self.sample_time
-                        )
-                    else:
-                        step = min(self.load_control_step, remaining)
-                        self._move_e(
-                            gcmd, extr, step,
-                            max_e_speed * self.load_min_feed_factor
-                        )
+                    step = min(
+                        self.load_feed_step * self.load_min_feed_factor,
+                        remaining
+                    )
+                    self._move_e(
+                        gcmd, extr, step,
+                        max_e_speed * self.load_min_feed_factor
+                    )
 
                     if (set_temp >= max_temp - 1.0e-6
-                            and self._temperature(extr) >= max_temp - 2.0
-                            and self.reactor.monotonic() - overforce_since
+                            and actual_temp >= max_temp - 2.0
+                            and now - overforce_since
                             > self.max_temp_stuck_time):
                         raise gcmd.error(
                             "Persistent load overforce at maximum temperature"
@@ -637,10 +703,12 @@ class LoadCellFilament:
                     else:
                         span = max(
                             1.0,
-                            overforce - (target_force + self.load_force_tolerance)
+                            overforce -
+                            (target_force + self.load_force_tolerance)
                         )
                         ratio = (
-                            force - (target_force + self.load_force_tolerance)
+                            force -
+                            (target_force + self.load_force_tolerance)
                         ) / span
                         speed_factor = 1.0 - ratio * (
                             1.0 - self.load_min_feed_factor
@@ -654,8 +722,6 @@ class LoadCellFilament:
                     self._move_e(
                         gcmd, extr, step, max_e_speed * speed_factor
                     )
-
-                previous_force = force
 
             gcmd.respond_info(
                 "LOAD_FILAMENT completed: %.1fmm extruded after force contact; "
