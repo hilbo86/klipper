@@ -2417,7 +2417,7 @@ calibrate_x: ...
 #   provided and is recommended to be near the center of the bed.
 ```
 
-### [load_cell_probe]
+### [load_cell_probe_renkforce]
 
 Load-cell based probe. One may define this section (instead of a probe
 section) to enable a load-cell based probe. See
@@ -2427,7 +2427,7 @@ information. Some of the parameters are determined in a semi-automatic
 [calibration procedure](LoadCellProbe.md#setup-for-new-printer-models).
 
 ```
-[load_cell_probe]
+[load_cell_probe_renkforce]
 #
 # General parameters:
 #
@@ -2436,20 +2436,24 @@ adc:
 adc_rate:
 #   Rate (in samples per second) at which to request the ADC samples.
 max_abs_force:
-#   Maximum absolute value of measured force (in chosen unit), if exceeded
-#   printer will shutdown immediately.
+#   Maximum absolute measured force in grams. If exceeded, the printer will
+#   shutdown immediately.
 #
 # Parameters determined by semi-automatic procedure described in the
 # load-cell probe guide.
 #
 force_calibration:
-#   Conversion factor to get from ADC value to physical unit. Default value is
-#   1 (no conversion).
+#   Conversion factor in grams per ADC unit. If omitted, the historical
+#   internal value 1 is used for probe compatibility, but the load_cell status
+#   remains uncalibrated and does not publish that value as force_g.
+#sensor_orientation: normal
+#   Direction of increasing force. May be "normal" or "inverted". The default
+#   is "normal".
 stiffness:
 #   Stiffness/"spring constant", i.e. force per distance. Default value is a
 #   safe value resulting in very small step sizes.
 noise_level:
-#   Noise level of force measurements (standard deviation, in physical units).
+#   Noise level of force measurements (standard deviation, in grams).
 #   Default value is a safe value just to get started.
 ```
 

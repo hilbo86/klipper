@@ -1314,10 +1314,11 @@ the PROBE command for details on the optional probe parameters. The
 optional `RETRIES`, `RETRY_TOLERANCE`, and `HORIZONTAL_MOVE_Z` values
 override those options specified in the config file.
 
-### [load_cell_probe]
+### [load_cell_probe_renkforce]
 
 The following commands are available when a
-[load_cell_probe config section](Config_Reference.md#load_cell_probe) is enabled
+[load_cell_probe_renkforce config section](Config_Reference.md#load_cell_probe_renkforce)
+is enabled
 (also see the [Load-cell probe guide](LoadCellProbe.md)):
 
 #### PROBE
@@ -1347,11 +1348,10 @@ Determine the `noise_level` configuration parameter from the given number of
 samples (defaults to 50).
 
 #### LCP_CALIB_WEIGHT
-`LCP_CALIB_WEIGHT WEIGHT=<weight> [SAMPLES=<n>]`:  Only used for the initial
-calibration. Determine the `force_calibration` configuration parameter, assuming
-the current ADC reading is the equivalent of the given `weight` value (in
-used-defined physical units). The optional number of samples is used for
-averaging (defaults to 10).
+`LCP_CALIB_WEIGHT WEIGHT=<weight> [SAMPLES=<n>]`: Only used for the initial
+calibration. Determine the `force_calibration` configuration parameter. `WEIGHT`
+is specified in grams and the resulting calibration uses grams per ADC unit.
+The optional number of samples is used for averaging (defaults to 10).
 
 #### LCP_CALIB_STIFFNESS
 `LCP_CALIB_STIFFNESS [SAMPLES=<n>]`: Only used for the initial calibration.

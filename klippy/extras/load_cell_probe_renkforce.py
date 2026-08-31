@@ -16,6 +16,7 @@ import sys
 import logging
 import random
 import math
+import collections
 
 syspath = sys.path
 sys.path = syspath[1:]
@@ -60,6 +61,10 @@ FIT_MIN_STEP_SIZE = 0.01
 
 # Number of retries if fit fails (due to FIT_MIN_QUALITY)
 MAX_RETRY = 5
+
+# Mainsail and mainline Klipper report force statistics over a short polling
+# window.  Keep this independent from the probe's averaging settings.
+FORCE_STATUS_WINDOW = 1.0
 
 ######################################################################
 # Helper functions - extracted from customized mathutil.py
@@ -163,9 +168,17 @@ class LoadCellProbe:
         # ADC conversion rate to request (in SPS)
         self._report_time = 1.0 / config.getfloat("adc_rate", above=0.0)
 
-        # Conversion factor to convert ADC readings into physical units.
+        # Conversion factor in grams per ADC unit.  Retain the historical 1.0
+        # internal default, but do not advertise its values as grams until an
+        # explicit configuration or a successful weight calibration exists.
+        force_calibration = config.get("force_calibration", None)
+        self._is_force_calibrated = force_calibration is not None
         self._force_calibration = config.getfloat(
             "force_calibration", default=1.0
+        )
+        self._orientation = config.getchoice(
+            "sensor_orientation", {"normal": 1.0, "inverted": -1.0},
+            default="normal"
         )
 
         # Maximum acceptable force
@@ -228,14 +241,21 @@ class LoadCellProbe:
         # initialise data members
         self._last_z_result = 0.0
         self._force_offset = None
+        self._reference_tare_value = None
+        self._tare_value = None
+        self._last_raw_adc = None
         self._last_uncompensated_force = None
         self._last_force = 0.0
         self._last_time = None
         self._stiffness_points = []
-        self._force_callbacks = []
+        self._sample_clients = []
+        self._legacy_clients = {}
+        self._force_window = collections.deque()
+        self._errors = 0
+        self._overflows = 0
 
         # subscribe to ADC callback
-        max_val = self._max_abs_force / self._force_calibration
+        max_val = self._max_abs_force / abs(self._force_calibration)
         self._mcu_adc.setup_minmax(self._report_time, 1, -max_val, max_val)
         self._mcu_adc.setup_adc_callback(
             self._report_time, self._adc_callback
@@ -294,7 +314,10 @@ class LoadCellProbe:
     cmd_LCP_CALIB_NOISE_help = (
         f"Determine typical noise level of load cell measurements."
     )
-    cmd_LCP_CALIB_WEIGHT_help = f"Calibrate to physical weight unit."
+    cmd_LCP_CALIB_WEIGHT_help = (
+        f"Calibrate force_calibration in grams per ADC unit using a known "
+        f"WEIGHT in grams."
+    )
     cmd_LCP_CALIB_STIFFNESS_help = f"Calibrate system stiffness."
     cmd_LCP_INFO_help = (
         f"Print load cell probe parameters to console."
@@ -313,9 +336,38 @@ class LoadCellProbe:
         pass
 
     def get_status(self, eventtime):
+        forces = [sample[1] for sample in self._force_window]
+        force_g = min_force_g = max_force_g = None
+        if self._is_force_calibrated and forces:
+            force_g = round(sum(forces) / len(forces), 1)
+            min_force_g = round(min(forces), 1)
+            max_force_g = round(max(forces), 1)
+        sample_rate = 0.0
+        if len(self._force_window) > 1:
+            duration = self._force_window[-1][0] - self._force_window[0][0]
+            if duration > 0.0:
+                sample_rate = ((len(self._force_window) - 1) / duration)
+        adc_units_per_gram = None
+        if self._is_force_calibrated:
+            adc_units_per_gram = 1.0 / self._force_calibration
         return {
+            "is_calibrated": self._is_force_calibrated,
+            "counts_per_gram": None,
+            "reference_tare_counts": None,
+            "tare_counts": None,
+            "force_g": force_g,
+            "min_force_g": min_force_g,
+            "max_force_g": max_force_g,
+            "sample_rate": round(sample_rate, 1),
             "last_force": self._last_force,
             "last_z_result": self._last_z_result,
+            "force_calibration": self._force_calibration,
+            "tare_force_g": self._force_offset,
+            "adc_units_per_gram": adc_units_per_gram,
+            "reference_tare_value": self._reference_tare_value,
+            "tare_value": self._tare_value,
+            "errors": self._errors,
+            "overflows": self._overflows,
         }
 
     def start_probe_session(self, gcmd=None):
@@ -361,28 +413,61 @@ class LoadCellProbe:
     def pull_probed_results(self):
         return self._results
 
+    def add_client(self, callback):
+        if callback not in self._sample_clients:
+            self._sample_clients.append(callback)
+
+    def remove_client(self, callback):
+        if callback in self._sample_clients:
+            self._sample_clients.remove(callback)
+
     def subscribe_force(self, force_callback):
-        self._force_callbacks.append(force_callback)
+        if force_callback in self._legacy_clients:
+            return
+        def legacy_callback(sample):
+            force_callback(sample["force_g"])
+        self._legacy_clients[force_callback] = legacy_callback
+        self.add_client(legacy_callback)
+
+    def unsubscribe_force(self, force_callback):
+        callback = self._legacy_clients.pop(force_callback, None)
+        if callback is not None:
+            self.remove_client(callback)
 
     def _handle_ready(self):
         # obtain toolhead object
         self.tool = self._printer.lookup_object("toolhead")
 
     def _adc_callback(self, time, value):
-        # convert to physical unit
+        # Preserve the original ADC value and convert it to grams.  Consumers
+        # that need an independent baseline use absolute_force_g and therefore
+        # remain unaffected by LCP_COMPENSATE.
+        self._last_raw_adc = value
         self._last_uncompensated_force = (
-            value * self._force_calibration
+            value * self._force_calibration * self._orientation
         )
         # First value after start: use as zero offset
         if self._force_offset is None:
             self._force_offset = self._last_uncompensated_force
+            self._reference_tare_value = value
+            self._tare_value = value
         self._last_time = time
         # Store zero offset compensated value for display
         self._last_force = (self._last_uncompensated_force -
                             self._force_offset)
-        # Send value to subscribers
-        for cb in self._force_callbacks:
-            cb(self._last_force)
+        self._force_window.append((time, self._last_force))
+        window_start = time - FORCE_STATUS_WINDOW
+        while (self._force_window
+               and self._force_window[0][0] < window_start):
+            self._force_window.popleft()
+        sample = {
+            "print_time": time,
+            "raw_adc": value,
+            "absolute_force_g": self._last_uncompensated_force,
+            "force_g": self._last_force,
+        }
+        for cb in list(self._sample_clients):
+            cb(sample)
 
     def _adc_wait_conversion_ready(self, gcmd):
         last_time = self._last_time
@@ -592,6 +677,8 @@ class LoadCellProbe:
         for s in range(sample_count):
             self._force_offset += self._read_uncompensated_force(gcmd)
         self._force_offset /= sample_count
+        scale = self._force_calibration * self._orientation
+        self._tare_value = self._force_offset / scale
         gcmd.respond_info(f"force_offset = {self._force_offset:.6f}")
 
     def cmd_LCP_CALIB_NOISE(self, gcmd):
@@ -634,11 +721,21 @@ class LoadCellProbe:
             )
         correction_factor = weight / force
         self._force_calibration *= correction_factor
+        self._is_force_calibrated = True
         gcmd.respond_info(
-            f"New force_calibration = {self._force_calibration:.6f}:"
+            f"New force_calibration = {self._force_calibration:.6f} "
+            f"grams per ADC unit:"
         )
-        self._noise_level *= correction_factor
+        self._noise_level *= abs(correction_factor)
         self._force_offset *= correction_factor
+        if self._last_uncompensated_force is not None:
+            self._last_uncompensated_force *= correction_factor
+            self._last_force = (self._last_uncompensated_force
+                                - self._force_offset)
+        self._force_window.clear()
+        if self._force_calibration:
+            scale = self._force_calibration * self._orientation
+            self._tare_value = self._force_offset / scale
         self._configfile.set(
             self._name, "force_calibration", self._force_calibration
         )
@@ -684,7 +781,10 @@ class LoadCellProbe:
     def LCP_INFO(self, gcmd):
         gcmd.respond_info(f"max_abs_force = {self._max_abs_force:.2f}")
         gcmd.respond_info(
-            f"force_calibration = {self._force_calibration:.2f}"
+            f"force_calibration = {self._force_calibration:.6f} g/ADC unit"
+        )
+        gcmd.respond_info(
+            f"is_calibrated = {self._is_force_calibrated}"
         )
         gcmd.respond_info(f"stiffness = {self._stiffness:.2f}")
         gcmd.respond_info(f"noise_level = {self._noise_level:.2f}")

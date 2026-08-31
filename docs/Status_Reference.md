@@ -329,6 +329,13 @@ The following information is available for each `[load_cell name]`:
   start of measurements.
 - `sample_rate`: The sensor's sample rate in samples per second.
 
+The Renkforce load-cell probe is also registered as `load_cell` and provides
+the same force fields. Its scaled ADC does not expose integer counts, so
+`counts_per_gram`, `reference_tare_counts`, and `tare_counts` are `None`.
+Instead it reports `adc_units_per_gram`, `reference_tare_value`, `tare_value`,
+`force_calibration` (grams per ADC unit), and `tare_force_g`. The legacy fields
+`last_force` and `last_z_result` remain available.
+
 ## load_cell_probe
 
 The following information is available for `[load_cell_probe]`:

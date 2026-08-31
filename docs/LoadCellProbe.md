@@ -7,7 +7,7 @@ which can be useful for CNC routers. Downside of a load-cell probe compared to
 other probe types is the slower speed and higher complexity.
 
 Please also read the
-[reference of the config section](Config_Reference.md#load_cell_probe), and the
+[reference of the config section](Config_Reference.md#load_cell_probe_renkforce), and the
 [reference of the g-code commands](G-Codes.md#load_cell_probe).
 
 ## Mechanical and electrical setup
@@ -147,13 +147,13 @@ A semi-automatic procedure has been developed to determine good parameters for
 the algorithm on new printer models. The following parameters need to be
 determined:
 
-- `force_calibration`: Conversion factor to convert ADC readings into physical
-  units. All other parameters are based on the chosen physical unit.
-- `max_abs_force`: Maximum acceptable force.
+- `force_calibration`: Conversion factor in grams per ADC unit. All force
+  parameters use grams.
+- `max_abs_force`: Maximum acceptable force in grams.
 - `stiffness`: Stiffness/"spring constant" of the mechanical system, i.e. force
   per distance.
 - `noise_level`: Noise level of force measurements (standard deviation, in
-  physical units).
+  grams).
 
 The `max_abs_force` has to be provided by the user. All other parameters are
 determined by the following procedure. The precision of the parameter values is
@@ -161,13 +161,8 @@ not particularly important - big safety margins will prevent exceeding the
 `max_abs_force` and the precision of the probe measurements in the end does not
 depend much on the parameters.
 
-The physical unit can be chosen freely. It is recommended to chose it such that
-typical values will be in the range 1 to 1000 or 10000 or so. The unit gram is
-a good choice, since extrusion forces are often around 1000 grams while the
-maximum acceptable force might be around a few 1000 grams. This keeps the
-numbers readable and understandable. Ounces may also be a good choice when being
-more familiar with imperial units, although you may want to display it with one
-digit after the decimal point then.
+The physical force unit is grams. This keeps probe and extrusion-force status
+compatible with Klipper's load-cell API and Mainsail.
 
 
 1. Make sure the load cell reading is sane. Ideally, place the force readout
@@ -193,8 +188,8 @@ digit after the decimal point then.
    and can be attached e.g. with tape to the heater block. Precision is not
    super important here, the calibration is just needed to get a rough idea of
    the forces. Execute the command `LCP_CALIB_WEIGHT WEIGHT=<known_weight>`
-   while replacing `<known_weight>` with the known weight in the chosen physical
-   unit (just the number, without unit).
+   while replacing `<known_weight>` with the known weight in grams (just the
+   number, without unit).
    Once the command is complete, execute `SAVE_CONFIG`. Note that this will
    convert the previously configured/determined values `max_abs_force` and
    `noise_level` automatically into the new unit.
