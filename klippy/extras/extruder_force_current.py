@@ -21,6 +21,21 @@ def select_run_current(curve, required_force, reserve=1.2,
     return None
 
 
+def validate_current_curve(curve, monotonic_tolerance=0.1,
+                           minimum_relative_gain=0.1):
+    ordered = sorted(curve, key=lambda item: item["current"])
+    if len(ordered) < 2:
+        return False
+    forces = [point["stable_force"] for point in ordered]
+    for previous, current in zip(forces, forces[1:]):
+        if current < previous * (1.0 - monotonic_tolerance):
+            return False
+    maximum = max(forces)
+    if maximum <= 0.0:
+        return False
+    return maximum - min(forces) >= maximum * minimum_relative_gain
+
+
 class ExtruderDriverAdapter:
     def __init__(self, printer, gcode, extruder_name, driver_name=None):
         self.printer = printer
@@ -94,6 +109,12 @@ class ExtruderForceCurrentCalibration:
             "grind_force_limit", None, above=0.0)
         self.grind_safety_factor = config.getfloat(
             "grind_safety_factor", 0.9, above=0.0, below=1.0)
+        self.minimum_z_height = config.getfloat(
+            "minimum_z_height", 5.0, minval=0.0)
+        self.monotonic_tolerance = config.getfloat(
+            "monotonic_tolerance", 0.1, minval=0.0, maxval=1.0)
+        self.minimum_relative_gain = config.getfloat(
+            "minimum_relative_gain", 0.1, above=0.0)
         self.settle_time = config.getfloat(
             "settle_time", 0.5, minval=0.0)
         self.measure_time = config.getfloat(
@@ -150,7 +171,8 @@ class ExtruderForceCurrentCalibration:
         manager = self.printer.lookup_object(
             "extrusion_force_profile_manager", None)
         profile_name = gcmd.get("PROFILE")
-        profile = manager.get_profile(profile_name) if manager is not None else None
+        profile = (manager.get_profile(profile_name)
+                   if manager is not None else None)
         if profile is None:
             raise gcmd.error(
                 "Unknown extrusion force profile '%s'" % (profile_name,))
@@ -168,6 +190,9 @@ class ExtruderForceCurrentCalibration:
         temperature = gcmd.get_float(
             "TEMPERATURE", minval=extruder.heater.min_extrude_temp,
             below=extruder.heater.max_temp)
+        if (profile.max_material_temperature is not None
+                and temperature > profile.max_material_temperature):
+            raise gcmd.error("TEMPERATURE exceeds profile material limit")
         self.force_ceiling = gcmd.get_float("FORCE_CEILING", above=0.0)
         repeats = gcmd.get_int("REPEATS", 2, minval=1)
         flow_start = gcmd.get_float("FLOW_START", above=0.0)
@@ -190,6 +215,10 @@ class ExtruderForceCurrentCalibration:
                 self.reactor.monotonic())
             if "z" not in kin_status.get("homed_axes", ""):
                 raise gcmd.error("Z must be homed before current calibration")
+            if toolhead.get_position()[2] < self.minimum_z_height:
+                raise gcmd.error(
+                    "Move nozzle to at least %.3fmm Z before current "
+                    "calibration" % (self.minimum_z_height,))
             self.gcode.run_script_from_command(
                 "ACTIVATE_EXTRUDER EXTRUDER=%s" % (extruder_name,))
             heaters = self.printer.lookup_object("heaters")
@@ -236,6 +265,12 @@ class ExtruderForceCurrentCalibration:
                 gcmd.respond_info(
                     "I=%.3fA stable=%.1fg peak=%.1fg"
                     % (current, point["stable_force"], point["peak_force"]))
+            if not validate_current_curve(
+                    curve, self.monotonic_tolerance,
+                    self.minimum_relative_gain):
+                raise gcmd.error(
+                    "Current/force curve is not sufficiently monotonic or "
+                    "current-dependent")
             result = select_run_current(
                 curve, required_force, self.force_reserve,
                 self.grind_force_limit, self.grind_safety_factor)
@@ -250,7 +285,8 @@ class ExtruderForceCurrentCalibration:
                     extruder_name, result, required_force, self.force_reserve))
             if save:
                 configfile = self.printer.lookup_object("configfile")
-                configfile.set(adapter.driver_name, "run_current", "%.3f" % result)
+                configfile.set(
+                    adapter.driver_name, "run_current", "%.3f" % result)
                 gcmd.respond_info(
                     "run_current staged; run SAVE_CONFIG after review")
         finally:

@@ -612,7 +612,7 @@ class LoadCellProbe:
 
     def _calc_median(self, positions):
         z_sorted = sorted(positions, key=lambda p: p[2])
-        middle = len(positions) / 2
+        middle = len(positions) // 2
         if (len(positions) & 1) == 1:
             # odd number of samples
             return z_sorted[middle]

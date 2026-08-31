@@ -1363,6 +1363,86 @@ optional number of samples is used for averaging (defaults to 10).
 `LCP_INFO`: Print parameters used by the load cell probe algorithms to the
 console. Useful for debugging and testing.
 
+### [extrusion_force_profile]
+
+#### SET_EXTRUSION_FORCE_PROFILE
+`SET_EXTRUSION_FORCE_PROFILE PROFILE=<name> [EXTRUDER=<name>]`: Select the
+force profile used for an extruder. A profile can only be assigned to the
+extruder named in that profile.
+
+### [extrusion_force_calibration]
+
+#### FORCE_FLOW_CALIBRATE
+`FORCE_FLOW_CALIBRATE PROFILE=<name> [EXTRUDER=<name>]
+TEMPERATURES=<t1,t2,...> FLOW_START=<flow> FLOW_STEP=<flow>
+FLOW_MAX=<flow> [SETTLE_TIME=<seconds>] [MEASURE_TIME=<seconds>]
+[ABORT_FORCE=<grams>]`: Record steady-state force curves and stage their
+profile data for `SAVE_CONFIG`. The nozzle must be homed, clear of the bed,
+hot enough to extrude, and protected by a configured force ceiling.
+
+#### FORCE_RESPONSE_CALIBRATE
+`FORCE_RESPONSE_CALIBRATE PROFILE=<name> [EXTRUDER=<name>]
+TEMPERATURE=<degrees_C> FLOW_LOW=<flow> FLOW_HIGH=<flow>
+[DURATION=<seconds>] [ABORT_FORCE=<grams>]`: Measure rise and fall response
+time constants and stage them for `SAVE_CONFIG`.
+
+### [z_sense_offset]
+
+#### Z_SENSE_OFFSET
+`Z_SENSE_OFFSET [MAX_Z_OFFSET=<mm>] [FORCE_THRESHOLD=<grams>]`: Enable
+first-layer upward-only Z compensation. With an active profile it uses dynamic
+excess force; `FORCE_THRESHOLD` is retained as a legacy fallback.
+
+#### Z_FORCE_CALIBRATE
+`Z_FORCE_CALIBRATE [EXTRUDER=<name>] LINE_LENGTH=<mm> LINE_SPEED=<mm/s>
+[LINE_SPACING=<mm>] FLOW=<mm^3/s> Z_STEP=<mm> STEPS=<count>
+ABORT_FORCE=<grams> MAX_GEOMETRIC_ERROR=<mm> [REFERENCE_MARGIN=<grams>]`:
+Print stepped calibration lines to estimate excess-force slope over Z
+compression. This deliberately moves Z downward during calibration; validate
+the starting first layer and use a conservative force ceiling.
+
+### [extrusion_force_guard]
+
+#### SET_EXTRUSION_FORCE_GUARD
+`SET_EXTRUSION_FORCE_GUARD ENABLE=<0|1>`: Enable or disable delivery-failure,
+overload, jam, and partial-clog monitoring. All detection thresholds must be
+configured before it can be enabled.
+
+### [extruder_force_current]
+
+#### EXTRUDER_CURRENT_CALIBRATE
+`EXTRUDER_CURRENT_CALIBRATE PROFILE=<name> [EXTRUDER=<name>]
+CURRENT_MIN=<amps> CURRENT_MAX=<amps> CURRENT_STEP=<amps>
+TEMPERATURE=<degrees_C> FORCE_CEILING=<grams> FLOW_START=<flow>
+FLOW_MAX=<flow> FLOW_STEP=<flow> [REPEATS=<count>]
+[REQUIRED_FORCE=<grams>] [SAVE=<0|1>]`: Measure a force/current curve and
+recommend the lowest run current with configured reserve. The original current
+and temperature target are restored on every exit. `SAVE=1` only stages the
+result; it does not run `SAVE_CONFIG`.
+
+### [extrusion_force_control]
+
+#### SET_EXTRUSION_FORCE_CONTROL
+`SET_EXTRUSION_FORCE_CONTROL [SPEED=<0|1>] [TEMP=<0|1>]`: Enable adaptive
+positive-extrusion speed limiting and the optional slower temperature-assist
+loop. Temperature assistance requires speed control.
+
+### [extrusion_force_diagnostics]
+
+#### EXTRUSION_FORCE_DIAGNOSTIC
+`EXTRUSION_FORCE_DIAGNOSTIC [PROFILE=<name>] [EXTRUDER=<name>]
+TEMPERATURE=<degrees_C> FLOW=<mm^3/s> LENGTH=<mm>
+ABORT_FORCE=<grams>`: Run a reference extrusion and report measured versus
+profile force.
+
+#### EXTRUSION_FORCE_PA_ANALYZE
+`EXTRUSION_FORCE_PA_ANALYZE [PROFILE=<name>] [EXTRUDER=<name>]
+PA_VALUES=<v1,v2,...> TEMPERATURE=<degrees_C> FLOW_LOW=<flow>
+FLOW_HIGH=<flow> [SEGMENT_TIME=<seconds>] ABORT_FORCE=<grams>`: Experimental
+force-response comparison for several pressure-advance values. It restores the
+original PA value, reports only a range for subsequent visual testing, and
+never writes configuration.
+
 
 ### [query_adc]
 

@@ -247,7 +247,8 @@ class ExtrusionForceControl:
                 return
             profile = self.monitor.get_active_profile(extruder_name)
             maximum = extruder.get_heater().max_temp - self.heater_safety_margin
-            if profile is not None and profile.max_material_temperature is not None:
+            if (profile is not None
+                    and profile.max_material_temperature is not None):
                 maximum = min(maximum, profile.max_material_temperature)
             maximum = min(
                 maximum, self.base_target + self.max_temperature_increase)
@@ -300,8 +301,9 @@ class ExtrusionForceControl:
     def cmd_SET_CONTROL(self, gcmd):
         speed_enabled = bool(gcmd.get_int(
             "SPEED", int(self.controller.enabled), minval=0, maxval=1))
+        temp_default = int(self.temperature_enabled and speed_enabled)
         temperature_enabled = bool(gcmd.get_int(
-            "TEMP", int(self.temperature_enabled), minval=0, maxval=1))
+            "TEMP", temp_default, minval=0, maxval=1))
         if (speed_enabled and (self.soft_force_margin is None
                               or self.hard_force_margin is None)):
             raise gcmd.error(

@@ -138,17 +138,20 @@ class SensingZOffset:
             return
         if state["motion_state"] != "EXTRUSION_STEADY":
             return
-        if state["confidence"] < self.minimum_confidence:
-            return
         expected = state["expected_dynamic_force_g"]
         excess = state["excess_force_g"]
         if expected is None or excess is None:
             if self.force_threshold is None:
                 return
+            fallback_confidence = max(0.0, self.minimum_confidence - 0.4)
+            if state["confidence"] < fallback_confidence:
+                return
             self.mode = "legacy_fallback"
             self.dynamic_threshold = self.force_threshold
             self._process_force(abs(state["force_control_g"]),
                                 self.force_threshold)
+            return
+        if state["confidence"] < self.minimum_confidence:
             return
         self.mode = "model"
         threshold = max(
@@ -197,7 +200,8 @@ class SensingZOffset:
                           y_step, abort_force):
         duration = line_length / line_speed
         position = self.tool.get_position()
-        tool_status = self.tool.get_status(self.printer.get_reactor().monotonic())
+        tool_status = self.tool.get_status(
+            self.printer.get_reactor().monotonic())
         x_min = tool_status["axis_minimum"][0]
         x_max = tool_status["axis_maximum"][0]
         direction = 1.0
@@ -206,8 +210,17 @@ class SensingZOffset:
         if position[0] - line_length < x_min and direction < 0.0:
             raise self.printer.command_error(
                 "Not enough X travel for Z force calibration line")
+        if y_step:
+            position[1] += y_step
+            y_min = tool_status["axis_minimum"][1]
+            y_max = tool_status["axis_maximum"][1]
+            if not y_min <= position[1] <= y_max:
+                raise self.printer.command_error(
+                    "Not enough Y travel for Z force calibration lines")
+            self.tool.manual_move(position, line_speed)
+            self.tool.wait_moves()
+            position = self.tool.get_position()
         position[0] += direction * line_length
-        position[1] += y_step
         y_min = tool_status["axis_minimum"][1]
         y_max = tool_status["axis_maximum"][1]
         if not y_min <= position[1] <= y_max:
@@ -238,13 +251,15 @@ class SensingZOffset:
 
     def cmd_Z_FORCE_CALIBRATE(self, gcmd):
         if self.monitor is None:
-            raise gcmd.error("Z_FORCE_CALIBRATE requires extrusion_force_monitor")
+            raise gcmd.error(
+                "Z_FORCE_CALIBRATE requires extrusion_force_monitor")
         state = self.monitor.get_latest_state()
         extruder_name = gcmd.get(
             "EXTRUDER", state["extruder"] if state is not None else "extruder")
         profile = self.monitor.get_active_profile(extruder_name)
         if profile is None:
-            raise gcmd.error("Z_FORCE_CALIBRATE requires an active force profile")
+            raise gcmd.error(
+                "Z_FORCE_CALIBRATE requires an active force profile")
         extruder = self.printer.lookup_object(extruder_name)
         line_length = gcmd.get_float("LINE_LENGTH", above=0.0)
         line_speed = gcmd.get_float("LINE_SPEED", above=0.0)
@@ -309,12 +324,12 @@ class SensingZOffset:
                 % (slope, self.minimum_force_margin))
         finally:
             self.calibration_window = None
+            self.monitor.release_operation(owner)
             position = self.tool.get_position()
             if position[2] < start_z:
                 position[2] = start_z
                 self.tool.manual_move(position, 2.0)
                 self.tool.wait_moves()
-            self.monitor.release_operation(owner)
 
     def get_status(self, eventtime):
         return {

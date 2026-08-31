@@ -5,6 +5,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
 import statistics
+import math
 
 
 class PressurePriming:
@@ -117,6 +118,8 @@ class PressurePriming:
             maxval=self.force_safety_limit)
         self.force_safety_limit = gcmd.get_float(
             "LIMIT", self.force_safety_limit, above=threshold)
+        if self.force_safety_limit <= threshold:
+            raise gcmd.error("LIMIT must be greater than THRESHOLD")
         maximum_length = gcmd.get_float(
             "LENGTH", self.max_prime_length_default, minval=1.0,
             maxval=100.0)
@@ -132,6 +135,9 @@ class PressurePriming:
         self.load_cell.add_client(self._sample_callback)
         self.overpressure = False
         try:
+            status = self.load_cell.get_status(self.reactor.monotonic())
+            if not status.get("is_calibrated", False):
+                raise gcmd.error("Load cell must be calibrated in grams")
             if self.tool.get_extruder().get_name() != extruder_name:
                 self.gcode.run_script_from_command(
                     "ACTIVATE_EXTRUDER EXTRUDER=%s" % (extruder_name,))
@@ -141,7 +147,7 @@ class PressurePriming:
             deadline = self.reactor.monotonic() + maximum_duration
             forces = []
             stable_hits = 0
-            for segment in range(int(maximum_length)):
+            for segment in range(int(math.ceil(maximum_length))):
                 if self.reactor.monotonic() >= deadline:
                     raise gcmd.error("Pressure priming timed out")
                 force = self._extrude_segment(gcmd, speed)

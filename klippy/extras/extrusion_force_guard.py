@@ -177,7 +177,8 @@ class ExtrusionForceGuard:
             "hard_overload_time": config.getfloat(
                 "hard_overload_time", None, above=0.0),
         }
-        if self.start_enabled and any(value is None for value in required.values()):
+        if (self.start_enabled
+                and any(value is None for value in required.values())):
             missing = [name for name, value in required.items()
                        if value is None]
             raise config.error(

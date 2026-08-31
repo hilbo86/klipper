@@ -225,7 +225,8 @@ class LoadCellFilament:
             if self.reactor.monotonic() >= deadline:
                 raise gcmd.error("Timeout collecting load-cell baseline")
             self.reactor.pause(self.reactor.monotonic() + self.sample_time)
-        values = [value for _, value in list(self.force_stream)[-self.zero_samples:]]
+        values = [value for _, value
+                  in list(self.force_stream)[-self.zero_samples:]]
         self.force_baseline = sum(values) / len(values)
         force = self._read_force()
         gcmd.respond_info(
@@ -297,7 +298,11 @@ class LoadCellFilament:
 
     def _begin_operation(self, gcmd, extr_name, owner):
         if self.running:
-            raise gcmd.error("A load-cell filament operation is already running")
+            raise gcmd.error(
+                "A load-cell filament operation is already running")
+        status = self.load_cell.get_status(self.reactor.monotonic())
+        if not status.get("is_calibrated", False):
+            raise gcmd.error("Load cell must be calibrated in grams")
         previous_extruder = self.tool.get_extruder().get_name()
         if self.monitor is not None:
             self.monitor.claim_operation(owner)

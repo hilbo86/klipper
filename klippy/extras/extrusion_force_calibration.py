@@ -52,6 +52,9 @@ class ExtrusionForceCalibration:
             "abort_force_rate", None, above=0.0)
         self.minimum_knee_slope_ratio = config.getfloat(
             "minimum_knee_slope_ratio", 2.0, above=1.0)
+        self.minimum_knee_fit_improvement = config.getfloat(
+            "minimum_knee_fit_improvement", 0.25,
+            minval=0.0, maxval=1.0)
         self.measurements = []
         self.collection_window = None
         self.safety_error = None
@@ -191,6 +194,8 @@ class ExtrusionForceCalibration:
 
     def _flow_limits(self, points, profile, abort_force):
         limits = {}
+        physical_limits = {}
+        lower_bounds = set()
         for temperature in sorted(set(
                 point["temperature"] for point in points)):
             curve = sorted((point for point in points
@@ -198,10 +203,15 @@ class ExtrusionForceCalibration:
                            key=lambda point: point["flow"])
             knee = detect_knee(
                 [(point["flow"], point["mean_force"]) for point in curve],
-                self.minimum_knee_slope_ratio)
+                self.minimum_knee_slope_ratio,
+                self.minimum_knee_fit_improvement)
             candidates = []
             if knee is not None:
                 candidates.append(knee["flow"] * profile.flow_safety_factor)
+                physical_limits[temperature] = knee["flow"]
+            else:
+                physical_limits[temperature] = curve[-1]["flow"]
+                lower_bounds.add(temperature)
             force_limit = abort_force * profile.flow_safety_factor
             for point in curve:
                 if point["mean_force"] >= force_limit:
@@ -209,7 +219,10 @@ class ExtrusionForceCalibration:
                     break
             if candidates:
                 limits[temperature] = min(candidates)
-        return limits
+            else:
+                limits[temperature] = (
+                    curve[-1]["flow"] * profile.flow_safety_factor)
+        return limits, physical_limits, lower_bounds
 
     def cmd_FORCE_FLOW_CALIBRATE(self, gcmd):
         monitor, profile, extruder_name, extruder = self._resolve(gcmd)
@@ -268,8 +281,12 @@ class ExtrusionForceCalibration:
                         "T=%.1fC Q=%.3fmm^3/s F=%.1f+/-%.1fg (%d samples)"
                         % (temperature, flow, point["mean_force"],
                            point["force_sigma"], point["sample_count"]))
-            limits = self._flow_limits(points, profile, abort_force)
-            profile.replace_calibration(points, limits)
+            limits, physical_limits, lower_bounds = self._flow_limits(
+                points, profile, abort_force)
+            profile.replace_calibration(
+                points, limits,
+                physical_flow_limits=physical_limits,
+                physical_flow_lower_bounds=lower_bounds)
             gcmd.respond_info(
                 "Force-flow profile '%s' updated; run SAVE_CONFIG after "
                 "reviewing the results" % (profile.name,))
@@ -320,7 +337,8 @@ class ExtrusionForceCalibration:
             fall = self._response_segment(
                 toolhead, extruder, flow_low, duration)
             if not low_before or not rise or not fall:
-                raise gcmd.error("Insufficient samples for response calibration")
+                raise gcmd.error(
+                    "Insufficient samples for response calibration")
             initial = statistics.mean(
                 force for _, force in low_before[len(low_before) // 2:])
             high = statistics.mean(force for _, force in rise[len(rise) // 2:])

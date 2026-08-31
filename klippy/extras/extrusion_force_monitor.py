@@ -134,7 +134,8 @@ class ExtrusionForceProcessor:
                  baseline_noise_factor=6.0, noise_tau=3.0,
                  extrusion_epsilon=0.0001, xy_epsilon=0.01,
                  minimum_flow=0.5, transient_time=0.30,
-                 flow_change_ratio=0.10, max_confident_noise=100.0):
+                 flow_change_ratio=0.10, max_confident_noise=100.0,
+                 extruder_switch_settle_time=0.5):
         self.fast_filter = ExponentialFilter(fast_filter_tau)
         self.control_filter = ExponentialFilter(control_filter_tau)
         self.trend_filter = ExponentialFilter(trend_filter_tau)
@@ -146,6 +147,9 @@ class ExtrusionForceProcessor:
             extrusion_epsilon, xy_epsilon, minimum_flow,
             transient_time, flow_change_ratio)
         self.max_confident_noise = max_confident_noise
+        self.extruder_switch_settle_time = extruder_switch_settle_time
+        self.last_extruder = None
+        self.extruder_changed_time = None
         self.last_fast_force = None
         self.last_force_time = None
         self.dynamic_expected = {}
@@ -159,7 +163,8 @@ class ExtrusionForceProcessor:
             return None
         previous = self.dynamic_expected.get(extruder)
         previous_time = self.dynamic_time.get(extruder)
-        if previous is None or previous_time is None or sample_time <= previous_time:
+        if (previous is None or previous_time is None
+                or sample_time <= previous_time):
             result = expected
         else:
             tau = (profile.response_tau_rise if expected >= previous
@@ -177,6 +182,9 @@ class ExtrusionForceProcessor:
         xy_velocity = float(observation.get("xy_velocity", 0.0))
         flow = max(0.0, float(observation.get("flow_mm3_s", 0.0)))
         extruder = observation.get("extruder")
+        if extruder != self.last_extruder:
+            self.last_extruder = extruder
+            self.extruder_changed_time = sample_time
         temperature = float(observation.get("temperature", 0.0))
         target_temperature = float(
             observation.get("target_temperature", temperature))
@@ -194,7 +202,8 @@ class ExtrusionForceProcessor:
         force_control = self.control_filter.update(force, sample_time)
         force_trend = self.trend_filter.update(force, sample_time)
         dforce_dt = 0.0
-        if (self.last_fast_force is not None and self.last_force_time is not None
+        if (self.last_fast_force is not None
+                and self.last_force_time is not None
                 and sample_time > self.last_force_time):
             dforce_dt = ((force_fast - self.last_fast_force)
                          / (sample_time - self.last_force_time))
@@ -224,6 +233,10 @@ class ExtrusionForceProcessor:
         if abs(temperature - target_temperature) > 2.0:
             confidence -= 0.15
         if noise > self.max_confident_noise:
+            confidence -= 0.2
+        if (self.extruder_changed_time is not None
+                and sample_time - self.extruder_changed_time
+                < self.extruder_switch_settle_time):
             confidence -= 0.2
         confidence = max(0.0, min(1.0, confidence))
 
@@ -342,7 +355,9 @@ class ExtrusionForceMonitor:
             flow_change_ratio=config.getfloat(
                 "flow_change_ratio", 0.10, above=0.0),
             max_confident_noise=config.getfloat(
-                "max_confident_noise", 100.0, above=0.0))
+                "max_confident_noise", 100.0, above=0.0),
+            extruder_switch_settle_time=config.getfloat(
+                "extruder_switch_settle_time", 0.5, minval=0.0))
         self.clients = []
         self.dump_clients = []
         self.latest = None
@@ -394,7 +409,8 @@ class ExtrusionForceMonitor:
             if state is None:
                 continue
             states[name] = state
-            if abs(state["e_velocity"]) > self.processor.classifier.extrusion_epsilon:
+            if (abs(state["e_velocity"])
+                    > self.processor.classifier.extrusion_epsilon):
                 moving.append(state)
         if moving:
             state = max(moving, key=lambda item: abs(item["e_velocity"]))

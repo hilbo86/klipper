@@ -2457,6 +2457,180 @@ noise_level:
 #   Default value is a safe value just to get started.
 ```
 
+### [extrusion_force_monitor]
+
+Time-synchronised, read-only interpretation of Renkforce load-cell and extruder
+TrapQ data. See [Extrusion force monitoring](Extrusion_Force.md).
+
+```
+[extrusion_force_monitor]
+#load_cell: load_cell
+#   Printer object providing the timestamped load-cell sample API.
+#fast_filter_tau: 0.08
+#control_filter_tau: 0.25
+#trend_filter_tau: 2.0
+#   Force filter time constants in seconds.
+#baseline_update_tau: 1.0
+#baseline_quiet_time: 0.5
+#baseline_max_deviation: 250.0
+#baseline_noise_factor: 6.0
+#   Local baseline tracking parameters. The baseline is frozen while extruding
+#   or retracting.
+#noise_tau: 3.0
+#minimum_flow: 0.5
+#transient_time: 0.30
+#flow_change_ratio: 0.10
+#   Motion classification parameters. Flow is measured in mm^3/s.
+#extrusion_epsilon: 0.0001
+#xy_epsilon: 0.01
+#max_confident_noise: 100.0
+#extruder_switch_settle_time: 0.5
+#callback_rate: 20.0
+#   Maximum public callback rate. May not exceed 20Hz.
+```
+
+### [extrusion_force_profile]
+
+One section is configured for each material/extruder/hotend/nozzle combination.
+
+```
+[extrusion_force_profile <name>]
+extruder:
+nozzle_diameter:
+#   These parameters must be provided.
+#filament_diameter: 1.75
+#hotend:
+#material:
+#max_material_temperature:
+#temperature_tolerance: 2.0
+#flow_safety_factor: 0.85
+#response_tau_rise: 0.25
+#response_tau_fall: 0.5
+#calibration_data:
+#recommended_max_flow:
+#physical_flow_limit:
+#physical_flow_lower_bound:
+#   These values are JSON data written by FORCE_FLOW_CALIBRATE. They
+#   should normally not be edited manually.
+```
+
+### [extrusion_force_calibration]
+
+```
+[extrusion_force_calibration]
+#monitor: extrusion_force_monitor
+#minimum_z_height: 5.0
+#baseline_time: 1.0
+#purge_length: 5.0
+#purge_flow: 2.0
+#abort_force:
+#   Default force ceiling in grams. Either this or ABORT_FORCE on every
+#   calibration command must be specified.
+#abort_force_rate:
+#   Optional force-rise ceiling in grams/s.
+#minimum_knee_slope_ratio: 2.0
+#minimum_knee_fit_improvement: 0.25
+```
+
+### [extrusion_force_guard]
+
+The guard is opt-in. Detection thresholds intentionally have no defaults and
+must be obtained from real measurements before enabling it.
+
+```
+[extrusion_force_guard]
+#monitor: extrusion_force_monitor
+#guard: False
+#minimum_monitor_flow:
+#minimum_expected_force:
+#underload_ratio:
+#underload_time:
+#underload_filament_length:
+#soft_force_margin:
+#hard_force_margin:
+#hard_overload_time:
+#   Required when guard is True. Forces are grams, time is seconds, filament
+#   length is millimeters, and flow is mm^3/s.
+#minimum_confidence: 0.8
+#pause_on_delivery_failure: True
+#pause_on_jam: True
+#delivery_failure_gcode:
+#jam_gcode:
+#health_tau: 120.0
+#clog_warning_score:
+```
+
+### [extruder_force_current]
+
+```
+[extruder_force_current]
+#monitor: extrusion_force_monitor
+#driver:
+#   Optional full TMC config-section name. By default the driver attached to
+#   the selected extruder is discovered.
+#force_reserve: 1.2
+#grind_force_limit:
+#grind_safety_factor: 0.9
+#minimum_z_height: 5.0
+#monotonic_tolerance: 0.1
+#minimum_relative_gain: 0.1
+#settle_time: 0.5
+#measure_time: 1.0
+```
+
+### [extrusion_force_control]
+
+Adaptive features are disabled by default. The move transform affects only
+positive-extrusion moves and chains with `z_sense_offset`.
+
+```
+[extrusion_force_control]
+#monitor: extrusion_force_monitor
+#adaptive_speed: False
+#adaptive_temperature: False
+#soft_force_margin:
+#hard_force_margin:
+#   Required before adaptive control can be enabled. Values are excess-force
+#   margins in grams.
+#control_interval: 0.25
+#min_speed_factor: 0.60
+#speed_down_rate: 0.5
+#speed_up_rate: 0.1
+#overload_debounce: 0.25
+#recovery_delay: 2.0
+#hysteresis: 50.0
+#minimum_confidence: 0.7
+#temperature_step: 5.0
+#temperature_step_interval: 10.0
+#temperature_recovery_interval: 30.0
+#max_temperature_increase: 15.0
+#heater_safety_margin: 2.0
+```
+
+### [extrusion_force_diagnostics]
+
+```
+[extrusion_force_diagnostics]
+#monitor: extrusion_force_monitor
+#minimum_z_height: 5.0
+#settle_time: 1.0
+#measure_time: 2.0
+#collision_detection: False
+#collision_impulse_threshold:
+#collision_derivative_threshold:
+#   Both thresholds are required when the experimental log-only collision
+#   detector is enabled. Units are grams and grams/s.
+#collision_min_xy_velocity: 1.0
+#collision_max_flow: 0.05
+#collision_cooldown: 0.5
+```
+
+The existing `[z_sense_offset]`, `[pressure_priming]`, and
+`[load_cell_filament]` sections automatically use the monitor's operation lock
+when it is configured. `z_sense_offset` additionally accepts
+`monitor`, `minimum_force_margin`, `noise_factor`, `relative_margin`,
+`minimum_confidence`, `z_force_slope_g_per_mm`, and `max_geometric_error`.
+
 ## Additional stepper motors and extruders
 
 ### [stepper_z1]

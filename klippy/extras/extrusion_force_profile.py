@@ -31,7 +31,8 @@ def _linear_fit(points):
     return slope, intercept, error
 
 
-def detect_knee(points, minimum_slope_ratio=2.0):
+def detect_knee(points, minimum_slope_ratio=2.0,
+                minimum_fit_improvement=0.25):
     """Find a two-line breakpoint without inventing one for linear data."""
     ordered = sorted((float(flow), float(force)) for flow, force in points)
     if len(ordered) < 5:
@@ -52,7 +53,8 @@ def detect_knee(points, minimum_slope_ratio=2.0):
         return None
     # A breakpoint must materially improve the fit, not merely split noise in
     # an otherwise linear curve.
-    if single_error <= 0.0 or best[0] >= single_error * 0.75:
+    if (single_error <= 0.0
+            or 1.0 - best[0] / single_error < minimum_fit_improvement):
         return None
     return {
         "flow": best[1],
@@ -89,6 +91,17 @@ class ForceProfile:
         self.points = self._load_points(config.get("calibration_data", ""))
         self.flow_limits = self._load_flow_limits(
             config.get("recommended_max_flow", ""))
+        self.physical_flow_limits = self._load_flow_limits(
+            config.get("physical_flow_limit", ""))
+        try:
+            lower_bounds = json.loads(
+                config.get("physical_flow_lower_bound", "[]"))
+            self.physical_flow_lower_bounds = set(
+                float(temperature) for temperature in lower_bounds)
+        except (TypeError, ValueError):
+            raise self.printer.config_error(
+                "Invalid physical_flow_lower_bound in [%s]"
+                % (self.section_name,))
         self.manager = self.printer.lookup_object(
             "extrusion_force_profile_manager", None)
         if self.manager is None:
@@ -161,8 +174,14 @@ class ForceProfile:
             if abs(temperature - temp) > self.temperature_tolerance:
                 return None
             return self._curve_force(curves[temp], flow)
-        if temperature < temperatures[0] or temperature > temperatures[-1]:
-            return None
+        if temperature < temperatures[0]:
+            if temperatures[0] - temperature > self.temperature_tolerance:
+                return None
+            temperature = temperatures[0]
+        elif temperature > temperatures[-1]:
+            if temperature - temperatures[-1] > self.temperature_tolerance:
+                return None
+            temperature = temperatures[-1]
         for temp in temperatures:
             if math.isclose(temperature, temp, rel_tol=0.0,
                             abs_tol=1e-9):
@@ -187,8 +206,14 @@ class ForceProfile:
             if abs(temperature - temp) > self.temperature_tolerance:
                 return None
             return self.flow_limits[temp]
-        if temperature < temperatures[0] or temperature > temperatures[-1]:
-            return None
+        if temperature < temperatures[0]:
+            if temperatures[0] - temperature > self.temperature_tolerance:
+                return None
+            temperature = temperatures[0]
+        elif temperature > temperatures[-1]:
+            if temperature - temperatures[-1] > self.temperature_tolerance:
+                return None
+            temperature = temperatures[-1]
         for temp in temperatures:
             if math.isclose(temperature, temp, rel_tol=0.0,
                             abs_tol=1e-9):
@@ -200,20 +225,45 @@ class ForceProfile:
                     upper_temp, self.flow_limits[upper_temp])
         return None
 
+    def get_physical_flow_limit(self, temperature):
+        if temperature in self.physical_flow_limits:
+            return {
+                "flow": self.physical_flow_limits[temperature],
+                "is_lower_bound": (
+                    temperature in self.physical_flow_lower_bounds),
+            }
+        return None
+
     def replace_calibration(self, points, flow_limits,
-                            response_tau_rise=None, response_tau_fall=None):
+                            response_tau_rise=None, response_tau_fall=None,
+                            physical_flow_limits=None,
+                            physical_flow_lower_bounds=None):
         self.points = list(points)
         self.flow_limits = dict(flow_limits)
         if response_tau_rise is not None:
             self.response_tau_rise = response_tau_rise
         if response_tau_fall is not None:
             self.response_tau_fall = response_tau_fall
+        if physical_flow_limits is not None:
+            self.physical_flow_limits = dict(physical_flow_limits)
+        if physical_flow_lower_bounds is not None:
+            self.physical_flow_lower_bounds = set(
+                physical_flow_lower_bounds)
         configfile = self.printer.lookup_object("configfile")
         configfile.set(self.section_name, "calibration_data",
                        json.dumps(self.points, separators=(",", ":")))
         limits = {str(temp): flow for temp, flow in self.flow_limits.items()}
         configfile.set(self.section_name, "recommended_max_flow",
                        json.dumps(limits, separators=(",", ":")))
+        physical_limits = {
+            str(temp): flow
+            for temp, flow in self.physical_flow_limits.items()}
+        configfile.set(self.section_name, "physical_flow_limit",
+                       json.dumps(physical_limits, separators=(",", ":")))
+        configfile.set(
+            self.section_name, "physical_flow_lower_bound",
+            json.dumps(sorted(self.physical_flow_lower_bounds),
+                       separators=(",", ":")))
         configfile.set(self.section_name, "response_tau_rise",
                        "%.6f" % (self.response_tau_rise,))
         configfile.set(self.section_name, "response_tau_fall",
@@ -231,6 +281,10 @@ class ForceProfile:
             "calibration_points": len(self.points),
             "response_tau_rise": self.response_tau_rise,
             "response_tau_fall": self.response_tau_fall,
+            "recommended_max_flow": dict(self.flow_limits),
+            "physical_flow_limit": dict(self.physical_flow_limits),
+            "physical_flow_lower_bound": sorted(
+                self.physical_flow_lower_bounds),
         }
 
 

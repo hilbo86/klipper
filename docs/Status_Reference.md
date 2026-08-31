@@ -336,6 +336,48 @@ Instead it reports `adc_units_per_gram`, `reference_tare_value`, `tare_value`,
 `force_calibration` (grams per ADC unit), and `tare_force_g`. The legacy fields
 `last_force` and `last_z_result` remain available.
 
+## extrusion_force_monitor
+
+The following information is available when `[extrusion_force_monitor]` is
+configured:
+- `enabled`, `extruder`, `profile`, and motion `state`.
+- `force_g`, `expected_force_g`, and `excess_force_g` in grams.
+- `flow_mm3_s`, `e_velocity`, and `temperature`.
+- `noise_g`, `confidence`, and the current shared `operation` owner.
+
+The `extrusion_force/dump` mux endpoint provides timestamped force, expected
+force, excess force, flow, temperature, state, and confidence records without
+per-sample log output.
+
+## extrusion_force_profile
+
+Each profile reports its material/extruder/hotend/nozzle identity, calibration
+point count, material temperature ceiling, and rise/fall response constants.
+
+## extrusion_force_guard
+
+Reports `enabled`, guard `state`, `last_fault`, `last_fault_time`, delivery and
+jam counters, `nozzle_health`, and `clog_score`.
+
+## extrusion_force_control
+
+Reports adaptive speed state and `speed_factor`, temperature-assist state,
+`base_target`, and `adaptive_delta`.
+
+## extruder_force_current
+
+Reports the last force/current `curve` and `recommended_current`.
+
+## extrusion_force_diagnostics
+
+Reports the last reference diagnostic, log-only collision count and timestamp,
+and the last experimental PA analysis.
+
+## z_sense_offset
+
+Reports `enabled`, model/legacy `mode`, current `z_offset`, dynamic force
+threshold, last evaluated force, and calibrated Z-force slope.
+
 ## load_cell_probe
 
 The following information is available for `[load_cell_probe]`:

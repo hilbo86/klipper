@@ -251,7 +251,8 @@ class ExtrusionForceDiagnostics:
         except ValueError:
             raise gcmd.error("Invalid PA_VALUES")
         if len(values) < 2 or any(value < 0.0 for value in values):
-            raise gcmd.error("PA_VALUES requires at least two non-negative values")
+            raise gcmd.error(
+                "PA_VALUES requires at least two non-negative values")
         return sorted(set(values))
 
     def cmd_PA_ANALYZE(self, gcmd):
@@ -308,7 +309,8 @@ class ExtrusionForceDiagnostics:
                           "rise": rise_metrics, "fall": fall_metrics}
                 results.append(result)
                 gcmd.respond_info(
-                    "PA %.5f: rise_tau=%s fall_tau=%s overshoot=%.1fg score=%.1f"
+                    "PA %.5f: rise_tau=%s fall_tau=%s overshoot=%.1fg "
+                    "score=%.1f"
                     % (pa,
                        ("%.3fs" % rise_metrics["tau"]
                         if rise_metrics["tau"] is not None else "n/a"),
@@ -316,7 +318,9 @@ class ExtrusionForceDiagnostics:
                         if fall_metrics["tau"] is not None else "n/a"),
                        rise_metrics["overshoot_g"]
                        + fall_metrics["overshoot_g"], score))
-            best = min(range(len(results)), key=lambda index: results[index]["score"])
+            best = min(
+                range(len(results)),
+                key=lambda index: results[index]["score"])
             lower = results[max(0, best - 1)]["pressure_advance"]
             upper = results[min(len(results) - 1, best + 1)]["pressure_advance"]
             self.last_pa_analysis = {
@@ -329,11 +333,13 @@ class ExtrusionForceDiagnostics:
                 "does not replace print-quality validation)" % (lower, upper))
         finally:
             self.collection_window = None
-            self.gcode.run_script_from_command(
-                "SET_PRESSURE_ADVANCE EXTRUDER=%s ADVANCE=%.6f"
-                % (extruder_name, original_pa))
-            self._set_temperature(extruder, original_target, False)
             self.monitor.release_operation(owner)
+            try:
+                self.gcode.run_script_from_command(
+                    "SET_PRESSURE_ADVANCE EXTRUDER=%s ADVANCE=%.6f"
+                    % (extruder_name, original_pa))
+            finally:
+                self._set_temperature(extruder, original_target, False)
 
     def get_status(self, eventtime):
         return {
