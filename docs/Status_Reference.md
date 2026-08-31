@@ -19,6 +19,14 @@ The following information is available in
   angle sensor is a tle5012b chip and if measurements are in progress
   (otherwise it reports `None`).
 
+## analog_input
+
+The following information is available in
+[analog_input some_name](Config_Reference.md#analog_input-my_analog_input)
+objects:
+- `value`: The latest scaled analog input value.
+- `unit`: The configured unit for the value.
+
 ## bed_mesh
 
 The following information is available in the
@@ -386,6 +394,15 @@ The following information is available in
 [output_pin some_name](Config_Reference.md#output_pin) and
 [pwm_tool some_name](Config_Reference.md#pwm_tool) objects:
 - `value`: The "value" of the pin, as set by a `SET_PIN` command.
+
+## power_output
+
+The following information is available in
+[power_output some_name](Config_Reference.md#power_output) objects:
+- `value`: The "value" of the pin, as set by a `SET_PIN` command.
+- `current`: The latest measured output current in amperes, or `None` if no
+  measurement has been received yet.
+- `current_unit`: The current unit, which is always `"A"`.
 
 ## palette2
 

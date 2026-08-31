@@ -3735,6 +3735,42 @@ pin:
 #   These options are deprecated and should no longer be specified.
 ```
 
+### [power_output]
+
+Run-time configurable output pins with an associated analog current
+measurement (one may define any number of sections with a "power_output"
+prefix). Supports the same output configuration options and `SET_PIN`
+interface as `output_pin` and additionally reports measured output current.
+The reported `current` is in amperes and `current_unit` is always `"A"`.
+
+```
+[power_output my_power_output]
+current_pin:
+#   The pin to use as an ADC input for current measurement. This parameter
+#   must be provided.
+#current_scale: 1.0
+#current_offset: 0.0
+#   Numbers that determine how the normalized ADC input is transformed to
+#   amperes. The formula "raw value * current_scale + current_offset" is
+#   applied. The defaults are 1.0 and 0.0 respectively.
+#current_report_time: 0.250
+#   The interval in seconds between current reports. The default is 0.250.
+#current_sample_time: 0.001
+#   The interval in seconds between current ADC samples. The default is
+#   0.001.
+#current_sample_count: 8
+#   The number of current ADC samples averaged for each report. The default
+#   is 8. The total sample time must be less than current_report_time.
+#pin:
+#pwm: False
+#value:
+#shutdown_value:
+#cycle_time: 0.100
+#hardware_pwm: False
+#scale:
+#   See the "output_pin" section for the definition of these parameters.
+```
+
 ### [static_pwm_clock]
 
 Static configurable output pin (one may define any number of
@@ -3846,6 +3882,13 @@ sensor_pin:
 #   A text string which is not used within Klipper, but is exposed in the
 #   API so that user interfaces can express these values properly. The
 #   default is an empty string.
+#report_time: 1.0
+#   The interval in seconds between reports. The default is 1.0.
+#sample_time: 0.001
+#   The interval in seconds between ADC samples. The default is 0.001.
+#sample_count: 8
+#   The number of ADC samples averaged for each report. The default is 8.
+#   The total sample time must be less than report_time.
 #limit1:
 #limit2:
 #...
