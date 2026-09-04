@@ -89,7 +89,15 @@ jobs:
           set -e
 
           if [[ "${ci_status}" -ne 0 ]]; then
-            log_tail="$(tail -n 40 ci-build.log)"
+            log_tail="$(
+              {
+                grep -Ei \
+                  '(error|failed|failure|traceback|undefined reference|make.*\*\*\*)' \
+                  ci-build.log || true
+                echo
+                tail -n 30 ci-build.log
+              } | tail -n 80 | cut -c 1-500
+            )"
             {
               echo '### Klipper test suite failed'
               echo '```text'
