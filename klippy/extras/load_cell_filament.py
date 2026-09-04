@@ -270,7 +270,8 @@ class LoadCellFilament:
 
     def _begin_operation(self, gcmd, extr_name):
         if self.running:
-            raise gcmd.error("A load-cell filament operation is already running")
+            raise gcmd.error(
+                "A load-cell filament operation is already running")
         previous_extruder = self.tool.get_extruder().get_name()
         self.running = True
         try:
@@ -285,13 +286,16 @@ class LoadCellFilament:
 
     def _end_operation(self, previous_extruder):
         try:
-            if previous_extruder and self.tool.get_extruder().get_name() != previous_extruder:
+            if (previous_extruder
+                    and self.tool.get_extruder().get_name()
+                    != previous_extruder):
                 self._activate_extruder(previous_extruder)
             self.gcode.run_script_from_command(
                 "RESTORE_GCODE_STATE NAME=_LOAD_CELL_FILAMENT_STATE"
             )
         except Exception:
-            logging.exception("Unable to restore G-code state after filament operation")
+            logging.exception(
+                "Unable to restore G-code state after filament operation")
         self.running = False
 
     # ------------------------------------------------------------------
@@ -299,7 +303,8 @@ class LoadCellFilament:
     # ------------------------------------------------------------------
 
     cmd_UNLOAD_FILAMENT_help = (
-        "Unload filament using load-cell tension feedback and a temperature ramp"
+        "Unload filament using load-cell tension feedback and a "
+        "temperature ramp"
     )
 
     def cmd_UNLOAD_FILAMENT(self, gcmd):
@@ -319,7 +324,8 @@ class LoadCellFilament:
 
         try:
             gcmd.respond_info(
-                "UNLOAD_FILAMENT %s: start %.1fC, max %.1fC, force %.0f, length %.1fmm"
+                "UNLOAD_FILAMENT %s: start %.1fC, max %.1fC, force %.0f, "
+                "length %.1fmm"
                 % (name, start_temp, max_temp, target_force, total_length)
             )
 
@@ -384,7 +390,8 @@ class LoadCellFilament:
                 actual_temp = self._temperature(extr)
 
                 if (force_relaxation >= self.unload_release_drop
-                        and prev_force <= target_force + self.unload_force_tolerance):
+                        and prev_force
+                        <= target_force + self.unload_force_tolerance):
                     released = True
                     reason = "force drop %.0f" % (force_relaxation,)
                 elif (moved_since_preload >= self.unload_release_motion
@@ -437,7 +444,8 @@ class LoadCellFilament:
                             max_temp_since = now
                         elif now - max_temp_since > self.max_temp_stuck_time:
                             raise gcmd.error(
-                                "Filament did not release at maximum temperature"
+                                "Filament did not release at maximum "
+                                "temperature"
                             )
                 else:
                     max_temp_since = None
@@ -478,7 +486,8 @@ class LoadCellFilament:
             try:
                 self._set_temperature(extr, 0.0, wait=False)
             except Exception:
-                logging.exception("Unable to switch off heater after unload error")
+                logging.exception(
+                    "Unable to switch off heater after unload error")
             raise
         finally:
             self._end_operation(previous_extruder)
@@ -488,7 +497,8 @@ class LoadCellFilament:
     # ------------------------------------------------------------------
 
     cmd_LOAD_FILAMENT_help = (
-        "Load filament using load-cell compression feedback and a temperature ramp"
+        "Load filament using load-cell compression feedback and a "
+        "temperature ramp"
     )
 
     def cmd_LOAD_FILAMENT(self, gcmd):
@@ -569,7 +579,8 @@ class LoadCellFilament:
             # not destroyed by a G92 command.
             load_zero_e = self.tool.get_position()[3]
             gcmd.respond_info(
-                "Load force reached; local extrusion length zeroed at force %.0f"
+                "Load force reached; local extrusion length zeroed at "
+                "force %.0f"
                 % (self._read_force(),)
             )
 
@@ -619,7 +630,8 @@ class LoadCellFilament:
                 else:
                     # Deliberate creep in the force dead band.  A rigid plug
                     # pushes the force back up; softened filament permits net
-                    # forward motion and the 3mm progress criterion can complete.
+                    # forward motion and the 3mm progress criterion can
+                    # complete.
                     self._move_e(
                         gcmd, extr, self.load_probe_step,
                         max_e_speed * self.load_min_feed_factor
@@ -637,18 +649,20 @@ class LoadCellFilament:
                     max_temp_since = None
 
             gcmd.respond_info(
-                "Load: %.2fmm advanced; normal temperature ramp held at %.1fC"
+                "Load: %.2fmm advanced; normal temperature ramp held at "
+                "%.1fC"
                 % (self.tool.get_position()[3] - load_zero_e, set_temp)
             )
 
             # Phase 4: Feed to 50mm total.  Temperature remains at the reached
-            # target unless force exceeds OVERFORCE.  Feed speed is continuously
-            # reduced as force approaches OVERFORCE and never exceeds FLOW.
+            # target unless force exceeds OVERFORCE.  Feed speed is
+            # continuously reduced as force approaches OVERFORCE and never
+            # exceeds FLOW.
             overforce_since = None
             next_status = self.reactor.monotonic()
             # Normal heating stopped at 3mm.  Keep the old ramp deadline so
-            # overforce heating can still increase at no more than the configured
-            # temperature_step / temperature_step_time.
+            # overforce heating can still increase at no more than the
+            # configured temperature_step / temperature_step_time.
             next_temp_step = max(
                 next_temp_step, self.reactor.monotonic() + self.temp_step_time
             )
@@ -732,7 +746,8 @@ class LoadCellFilament:
             if restore_temp:
                 self._set_temperature(extr, previous_target, wait=False)
                 gcmd.respond_info(
-                    "Restored previous heater target: %.1fC" % (previous_target,)
+                    "Restored previous heater target: %.1fC"
+                    % (previous_target,)
                 )
 
         except Exception:

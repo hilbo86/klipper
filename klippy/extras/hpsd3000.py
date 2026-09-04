@@ -61,8 +61,12 @@ class HPSD3000:
             logging.exception("HPSD3000: Error reading data")
             self.temp = self.pressure = .0
             return self.reactor.NEVER
-        self.pressure = (int.from_bytes(data[:2], 'big') - HPSD_PDAT_MIN) / HPSD_CONST_S - HPSD_P_MIN
-        self.temp = (int.from_bytes(data[2:], 'big') - HPSD_OFFSET_T) / HPSD_CONST_T
+        self.pressure = (
+            (int.from_bytes(data[:2], 'big') - HPSD_PDAT_MIN)
+            / HPSD_CONST_S - HPSD_P_MIN)
+        self.temp = (
+            (int.from_bytes(data[2:], 'big') - HPSD_OFFSET_T)
+            / HPSD_CONST_T)
         measured_time = self.reactor.monotonic()
         self._callback(self.mcu.estimated_print_time(measured_time), self.temp)
         return measured_time + REPORT_TIME

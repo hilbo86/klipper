@@ -80,7 +80,9 @@ class PressurePriming:
         speed = gcmd.get_float('SPEED', 2*60, minval=0.5*60, maxval=15*60)/60.
 
         starttime = self.reactor.monotonic()
-        max_priming_dur = self.max_prime_length / min(extr.max_e_velocity, speed) * 2  # Speed 2: 0.806 s/mm
+        # Speed 2: 0.806 s/mm
+        max_priming_dur = (
+            self.max_prime_length / min(extr.max_e_velocity, speed) * 2)
         gcmd.respond_info(
             f'Starting Pressure Priming at timestamp ' \
             f'{starttime:.0f} - Parameters: \n' \
@@ -90,7 +92,7 @@ class PressurePriming:
             f'Prime length: {self.max_prime_length}\n' \
             f'Extrusion speed: {speed:.2f}\n' \
             f'Max E-Speed: {extr.max_e_velocity:.2f}\n' \
-            f'Max. Priming Duration: {max_priming_dur:.2f} s'            
+            f'Max. Priming Duration: {max_priming_dur:.2f} s'
         )
 
         # Check if target temp is reached, otherwise wait for it
@@ -147,7 +149,9 @@ class PressurePriming:
             self.running = False # Kraftmessung deaktivieren
             # Kraftmessung verarbeiten
             # Anzahl der Messungen während der Extrusion
-            measurements = len(self.force_protocol[self.loop]) if len(self.force_protocol) > self.loop else 0
+            measurements = (
+                len(self.force_protocol[self.loop])
+                if len(self.force_protocol) > self.loop else 0)
             cutoff = max(3, int(measurements/6)) # Ränder ignorieren
             # --> Länge des Randbereichs bestimmen
             # Summe für Mittelwert bilden. Nur Blockmitte betrachte
@@ -162,7 +166,8 @@ class PressurePriming:
             self.force_delta.append(delta_f) # Delta loggen
             #mean_force = 0.1 # !!!!!!!!!!!!!!!!!!!!! Dummy
             # -> Quasi-Nullen, um Schleife durchlaufen zu lassen
-            gcmd.respond_info(', '.join([f'{x:.0f}' for x in self.force_protocol[self.loop]]))
+            gcmd.respond_info(', '.join(
+                [f'{x:.0f}' for x in self.force_protocol[self.loop]]))
             self.loop += 1 # loop inkrementieren
             self.force_protocol.append([])
             self.running = True
@@ -179,7 +184,8 @@ class PressurePriming:
                 # Falls Kraft (wieder) unter Schwellwert, Flag zurücksetzen
             # auf Abbruchkriterien prüfen & ggf. Schleife abbrechen
             if self.overpressure:
-                gcmd.respond_info('Aborting - Force Safety-Limit exceeded') # error statt respond_info
+                # error statt respond_info
+                gcmd.respond_info('Aborting - Force Safety-Limit exceeded')
                 break
             elif self.loop > self.max_prime_length:
                 gcmd.respond_info('Aborting - Max Priming Length exceeded')
@@ -197,7 +203,8 @@ class PressurePriming:
                    f'F_d={self.force_delta[i]:>4.0f}' for i in range(self.loop)]
         gcmd.respond_info('\n'.join(summary))
         if self.reset_ttemp is not None:
-            gcmd.respond_info(f'Resetting target temperature to {self.reset_ttemp}')
+            gcmd.respond_info(
+                f'Resetting target temperature to {self.reset_ttemp}')
             pheaters = self.printer.lookup_object('heaters')
             pheaters.set_temperature(extr.get_heater(), self.reset_ttemp)
 
