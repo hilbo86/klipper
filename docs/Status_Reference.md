@@ -24,8 +24,11 @@ The following information is available in
 The following information is available in
 [analog_input some_name](Config_Reference.md#analog_input-my_analog_input)
 objects:
-- `value`: The latest scaled analog input value.
+- `value`: The latest scaled analog input value, rounded to the configured
+  number of decimal places.
 - `unit`: The configured unit for the value.
+- `decimal_places`: The configured number of decimal places clients should
+  use when displaying the value.
 
 ## bed_mesh
 

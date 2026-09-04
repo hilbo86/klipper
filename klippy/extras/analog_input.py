@@ -78,6 +78,8 @@ class PrinterAnalogInput:
     def __init__(self, config):
         self.name = config.get_name()
         self.unit = config.get("unit", "")
+        self.decimal_places = config.getint(
+            "decimal_places", 2, minval=0, maxval=6)
         self._limit_helpers = []
         for i in range(1, 1000):
             if config.get("limit%d" % (i, ), None) is None:
@@ -112,8 +114,9 @@ class PrinterAnalogInput:
 
     def get_status(self, eventtime):
         return {
-            "value": round(self.last_value, 2),
+            "value": round(self.last_value, self.decimal_places),
             "unit": self.unit,
+            "decimal_places": self.decimal_places,
         }
 
 

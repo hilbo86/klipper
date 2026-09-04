@@ -3882,6 +3882,10 @@ sensor_pin:
 #   A text string which is not used within Klipper, but is exposed in the
 #   API so that user interfaces can express these values properly. The
 #   default is an empty string.
+#decimal_places: 2
+#   The number of decimal places clients should use when displaying the
+#   scaled value. The value reported through the API is rounded to this
+#   precision. Valid values are from 0 to 6. The default is 2.
 #report_time: 1.0
 #   The interval in seconds between reports. The default is 1.0.
 #sample_time: 0.001
