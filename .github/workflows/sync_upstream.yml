@@ -81,7 +81,27 @@ jobs:
 
       - name: Run Klipper test suite
         if: steps.sync.outputs.validate == 'true'
-        run: ./scripts/ci-build.sh 2>&1
+        shell: bash
+        run: |
+          set +e
+          ./scripts/ci-build.sh 2>&1 | tee ci-build.log
+          ci_status="${PIPESTATUS[0]}"
+          set -e
+
+          if [[ "${ci_status}" -ne 0 ]]; then
+            log_tail="$(tail -n 40 ci-build.log)"
+            {
+              echo '### Klipper test suite failed'
+              echo '```text'
+              printf '%s\n' "${log_tail}"
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+            log_tail="${log_tail//'%'/'%25'}"
+            log_tail="${log_tail//$'\r'/'%0D'}"
+            log_tail="${log_tail//$'\n'/'%0A'}"
+            echo "::error file=scripts/ci-build.sh,title=Klipper test suite failed::${log_tail}"
+            exit "${ci_status}"
+          fi
 
       - name: Push validated branches
         if: steps.sync.outputs.changed == 'true'
