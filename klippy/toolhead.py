@@ -465,21 +465,31 @@ class ToolHead:
         self._calc_print_time()
         start_time = end_time = self.print_time
         for move in moves:
-            self.trapq_append(
-                self.trapq, end_time,
-                move.accel_t, move.cruise_t, move.decel_t,
-                move.start_pos[0], move.start_pos[1], move.start_pos[2],
-                move.axes_r[0], move.axes_r[1], move.axes_r[2],
-                move.start_v, move.cruise_v, move.accel)
+            if move.is_kinematic_move:
+                self.trapq_append(
+                    self.trapq, end_time,
+                    move.accel_t, move.cruise_t, move.decel_t,
+                    move.start_pos[0], move.start_pos[1], move.start_pos[2],
+                    move.axes_r[0], move.axes_r[1], move.axes_r[2],
+                    move.start_v, move.cruise_v, move.accel)
+            for e_index, ea in enumerate(self.extra_axes):
+                if move.axes_d[e_index + 3]:
+                    ea.process_move(end_time, move, e_index + 3)
             end_time = end_time + move.accel_t + move.cruise_t + move.decel_t
         self.lookahead.reset()
         return start_time, end_time
-    def drip_move(self, newpos, speed, drip_completion):
+    def drip_move(self, newpos, speed, drip_completion,
+                  allow_extra_axes=False):
         # Create and verify move is valid
-        newpos = newpos[:3] + self.commanded_pos[3:]
+        if not allow_extra_axes:
+            newpos = newpos[:3] + self.commanded_pos[3:]
         move = Move(self, self.commanded_pos, newpos, speed)
         if move.move_d:
-            self.kin.check_move(move)
+            if move.is_kinematic_move:
+                self.kin.check_move(move)
+            for e_index, ea in enumerate(self.extra_axes):
+                if move.axes_d[e_index + 3]:
+                    ea.check_move(move, e_index + 3)
         # Make sure stepper movement doesn't start before nominal start time
         kin_flush_delay = self.motion_queuing.get_kin_flush_delay()
         self.dwell(kin_flush_delay)
@@ -490,6 +500,9 @@ class ToolHead:
                                              drip_completion)
         # Move finished; cleanup any remnants on trapq
         self.motion_queuing.wipe_trapq(self.trapq)
+        for e_index, ea in enumerate(self.extra_axes):
+            if move.axes_d[e_index + 3]:
+                self.motion_queuing.wipe_trapq(ea.get_trapq())
     # Misc commands
     def stats(self, eventtime):
         est_print_time = self.mcu.estimated_print_time(eventtime)

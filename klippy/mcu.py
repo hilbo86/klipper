@@ -264,6 +264,9 @@ class MCU_trsync:
                                           reqclock=clock)
     def set_home_end_time(self, home_end_time):
         self._home_end_clock = self._mcu.print_time_to_clock(home_end_time)
+    def trigger(self, reason=REASON_HOST_REQUEST):
+        if self._trigger_completion is not None:
+            self._trsync_trigger_cmd.send([self._oid, reason])
     def stop(self):
         self._response_trsync.unregister()
         self._response_trsync = None
@@ -328,6 +331,14 @@ class TriggerDispatch:
         if self._mcu.is_fileoutput():
             self._trigger_completion.complete(True)
         self._trigger_completion.wait()
+    def trigger(self, reason=MCU_trsync.REASON_HOST_REQUEST):
+        if self._trigger_completion is None:
+            return
+        # Trigger every motion MCU directly.  The trdispatch fast-reader also
+        # propagates the first trigger it observes, but sending to each MCU
+        # here minimizes the stop latency for a host initiated request.
+        for trsync in self._trsyncs:
+            trsync.trigger(reason)
     def stop(self):
         ffi_main, ffi_lib = chelper.get_ffi()
         ffi_lib.trdispatch_stop(self._trdispatch)
