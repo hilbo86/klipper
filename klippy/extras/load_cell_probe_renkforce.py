@@ -164,8 +164,10 @@ class LoadCellProbe:
         self._report_time = 1.0 / config.getfloat("adc_rate", above=0.0)
 
         # Conversion factor to convert ADC readings into physical units.
-        self._force_calibration = config.getfloat(
-            "force_calibration", default=1.0
+        force_calibration = config.getfloat("force_calibration", None)
+        self._is_calibrated = force_calibration is not None
+        self._force_calibration = (
+            force_calibration if self._is_calibrated else 1.0
         )
 
         # Maximum acceptable force
@@ -230,6 +232,7 @@ class LoadCellProbe:
         self._force_offset = None
         self._last_uncompensated_force = None
         self._last_force = 0.0
+        self._last_raw_value = 0.0
         self._last_time = None
         self._stiffness_points = []
         self._force_callbacks = []
@@ -314,7 +317,9 @@ class LoadCellProbe:
 
     def get_status(self, eventtime):
         return {
+            "is_calibrated": self._is_calibrated,
             "last_force": self._last_force,
+            "last_raw_value": self._last_raw_value,
             "last_z_result": self._last_z_result,
         }
 
@@ -369,6 +374,10 @@ class LoadCellProbe:
         self.tool = self._printer.lookup_object("toolhead")
 
     def _adc_callback(self, time, value):
+        get_raw_value = getattr(self._mcu_adc, "get_last_raw_value", None)
+        self._last_raw_value = (
+            get_raw_value() if get_raw_value is not None else value
+        )
         # convert to physical unit
         self._last_uncompensated_force = (
             value * self._force_calibration
@@ -634,6 +643,7 @@ class LoadCellProbe:
             )
         correction_factor = weight / force
         self._force_calibration *= correction_factor
+        self._is_calibrated = True
         gcmd.respond_info(
             f"New force_calibration = {self._force_calibration:.6f}:"
         )
