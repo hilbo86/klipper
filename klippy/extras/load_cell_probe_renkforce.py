@@ -246,6 +246,7 @@ class LoadCellProbe:
         self._last_raw_adc = None
         self._last_uncompensated_force = None
         self._last_force = 0.0
+        self._last_raw_value = 0.0
         self._last_time = None
         self._stiffness_points = []
         self._sample_clients = []
@@ -360,6 +361,7 @@ class LoadCellProbe:
             "max_force_g": max_force_g,
             "sample_rate": round(sample_rate, 1),
             "last_force": self._last_force,
+            "last_raw_value": self._last_raw_value,
             "last_z_result": self._last_z_result,
             "force_calibration": self._force_calibration,
             "tare_force_g": self._force_offset,
@@ -443,6 +445,10 @@ class LoadCellProbe:
         # that need an independent baseline use absolute_force_g and therefore
         # remain unaffected by LCP_COMPENSATE.
         self._last_raw_adc = value
+        get_raw_value = getattr(self._mcu_adc, "get_last_raw_value", None)
+        self._last_raw_value = (
+            get_raw_value() if get_raw_value is not None else value
+        )
         self._last_uncompensated_force = (
             value * self._force_calibration * self._orientation
         )
