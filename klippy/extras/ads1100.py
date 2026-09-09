@@ -27,6 +27,7 @@ class MCU_ADS1100:
         self._gain = main._gain
 
         self._last_value = 0.
+        self._last_raw_value = 0.
         self._last_time = 0
         self._value = 0.
         self._state = 0
@@ -70,6 +71,10 @@ class MCU_ADS1100:
 
     def get_last_value(self):
         return self._last_value, self._last_time
+
+
+    def get_last_raw_value(self):
+        return self._last_raw_value
 
 
     def _build_config(self):
@@ -135,7 +140,8 @@ class MCU_ADS1100:
         if self._state < self._sample_count :
           return eventtime + self._sample_time
 
-        self._last_value = self._value / self._sample_count / self._norm
+        self._last_raw_value = self._value / self._sample_count
+        self._last_value = self._last_raw_value / self._norm
         self._last_time = receive_time
 
         self._state = 0
