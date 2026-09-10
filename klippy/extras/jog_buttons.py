@@ -256,6 +256,12 @@ class JogButtons:
         self._emit_virtual(eventtime, 'emergency_stop', state)
 
     def _get_display_position(self, eventtime):
+        if self.toolhead is None:
+            # Webhooks may query status before klippy:mcu_identify has run.
+            display_pos = (self.last_display_position
+                           if self.last_display_position is not None
+                           else [0., 0., 0., 0.])
+            return self.gcode.Coord(display_pos)
         commanded_pos = self.toolhead.get_position()
         if self.active_input is None:
             self.last_display_position = list(commanded_pos)
