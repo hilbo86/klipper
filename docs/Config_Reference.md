@@ -3881,6 +3881,11 @@ display or gcode_button section. The `[jog_buttons]` section must occur before
 sections which reference its logical pins. Logical pins do not support `!`,
 `^`, or `~` prefixes.
 
+If `emergency_stop_pin` is configured, its state is always published as
+`jog_buttons:emergency_stop`, including while manual mode is active. A press
+also invokes an immediate Klipper shutdown independently of the virtual pin
+consumer, manual mode, homing state, and G-Code processor availability.
+
 Manual mode can also be controlled with `SET_JOG_MODE ENABLE=<0|1>` or the
 `jog_buttons/set_mode` API endpoint with an `enable` boolean parameter. The
 `jog_buttons.enabled` status field reports its current state. Starting another
@@ -3906,6 +3911,7 @@ mode.
 #emergency_stop_pin:
 #   An optional MCU pin that immediately shuts down the printer when pressed.
 #   This input remains responsive while a jog holds the G-Code processor lock.
+#   Its state is also available as the jog_buttons:emergency_stop logical pin.
 #enable_hold_time: 2.0
 #   Duration of an OK-button hold which toggles manual mode. The minimum and
 #   default are two seconds.
