@@ -863,8 +863,9 @@ The following command is available when a
 [jog_buttons config section](Config_Reference.md#jog_buttons) is enabled.
 
 #### SET_JOG_MODE
-`SET_JOG_MODE ENABLE=<0|1>`: Enables or disables guarded manual jogging.
-Enabling is rejected unless all XYZ axes are homed and the printer is idle.
+`SET_JOG_MODE ENABLE=<0|1> [MODE=<CONTINUOUS|STEP>]`: Enables or disables
+guarded manual jogging and optionally selects the motion mode. Enabling is
+rejected unless all XYZ axes are homed and the printer is idle.
 
 ### [led]
 
