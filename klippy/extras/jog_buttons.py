@@ -9,6 +9,7 @@ import mcu
 
 HOMING_START_DELAY = 0.001
 MODE_GUARD_INTERVAL = 0.100
+DISPLAY_BLINK_INTERVAL = 2.0
 VIRTUAL_CLICK_DELAY = 0.001
 
 
@@ -48,6 +49,9 @@ class JogButtons:
         self.is_ready = self.enabled = self.dispatch_active = False
         self.active_input = None
         self.motion_mode = 'continuous'
+        self.display_blink_epoch = 0.
+        self.last_display_position = None
+        self.position_error_logged = False
         self.last_reject = ""
         self.enable_hold_time = config.getfloat(
             'enable_hold_time', 2., minval=2.)
@@ -67,6 +71,7 @@ class JogButtons:
         self.mode_beep_value = config.getfloat(
             'mode_beep_value', .5, minval=0., maxval=1.)
         self.mode_beeper = None
+        self.mode_beeper_type = None
         xy_speed = config.getfloat('xy_speed', 40., above=0.)
         z_speed = config.getfloat('z_speed', 5., above=0.)
         extrude_speed = config.getfloat('extrude_speed', 5., above=0.)
@@ -195,16 +200,41 @@ class JogButtons:
         self.print_stats = self.printer.lookup_object('print_stats', None)
         self.virtual_sd = self.printer.lookup_object('virtual_sdcard', None)
         if self.mode_beeper_name is not None:
-            name = 'pwm_cycle_time ' + self.mode_beeper_name
-            self.mode_beeper = self.printer.lookup_object(name, None)
-            if (self.mode_beeper is None
-                or not hasattr(self.mode_beeper, 'mcu_pin')
-                or not hasattr(self.mode_beeper.mcu_pin,
-                               'set_pwm_cycle')):
+            pwm_name = 'pwm_cycle_time ' + self.mode_beeper_name
+            output_name = 'output_pin ' + self.mode_beeper_name
+            pwm_beeper = self.printer.lookup_object(pwm_name, None)
+            output_beeper = self.printer.lookup_object(output_name, None)
+            if pwm_beeper is not None and output_beeper is not None:
+                raise self.printer.config_error(
+                    "[jog_buttons] mode_beeper '%s' is ambiguous; use"
+                    " distinct [pwm_cycle_time] and [output_pin] names"
+                    % (self.mode_beeper_name,))
+            if pwm_beeper is not None:
+                if (not hasattr(pwm_beeper, 'mcu_pin')
+                    or not hasattr(pwm_beeper.mcu_pin,
+                                   'set_pwm_cycle')):
+                    raise self.printer.config_error(
+                        "Invalid [pwm_cycle_time %s] for [jog_buttons]"
+                        % (self.mode_beeper_name,))
+                self.mode_beeper = pwm_beeper
+                self.mode_beeper_type = 'pwm'
+            elif output_beeper is not None:
+                if (getattr(output_beeper, 'is_pwm', True)
+                    or not hasattr(output_beeper, 'mcu_pin')
+                    or not hasattr(output_beeper.mcu_pin, 'set_digital')
+                    or not hasattr(output_beeper, 'gcrq')):
+                    raise self.printer.config_error(
+                        "[jog_buttons] mode_beeper '%s' must name a"
+                        " non-PWM [output_pin]"
+                        % (self.mode_beeper_name,))
+                self.mode_beeper = output_beeper
+                self.mode_beeper_type = 'digital'
+            else:
                 raise self.printer.config_error(
                     "[jog_buttons] mode_beeper '%s' must name a"
-                    " [pwm_cycle_time] section"
+                    " [pwm_cycle_time] or non-PWM [output_pin] section"
                     % (self.mode_beeper_name,))
+        self.last_display_position = self.toolhead.get_position()
         self.is_ready = True
 
     def _handle_shutdown(self):
@@ -225,15 +255,49 @@ class JogButtons:
                 "Shutdown due to jog emergency-stop button")
         self._emit_virtual(eventtime, 'emergency_stop', state)
 
+    def _get_display_position(self, eventtime):
+        commanded_pos = self.toolhead.get_position()
+        if self.active_input is None:
+            self.last_display_position = list(commanded_pos)
+            self.position_error_logged = False
+            return self.toolhead.Coord(commanded_pos)
+        try:
+            kin_spos = {}
+            for stepper in self.kin_steppers:
+                pos_time = stepper.get_mcu().estimated_print_time(eventtime)
+                mcu_pos = stepper.get_past_mcu_position(pos_time)
+                kin_spos[stepper.get_name()] = (
+                    stepper.mcu_to_commanded_position(mcu_pos))
+            kin_pos = self.kin.calc_position(kin_spos)
+            display_pos = [
+                pos if pos is not None else commanded_pos[axis]
+                for axis, pos in enumerate(kin_pos)
+            ] + commanded_pos[3:]
+            self.last_display_position = display_pos
+            self.position_error_logged = False
+        except Exception:
+            # Status generation must remain safe during motion and shutdown.
+            if not self.position_error_logged:
+                logging.exception(
+                    "Unable to calculate current manual-jog position")
+                self.position_error_logged = True
+            display_pos = (self.last_display_position
+                           if self.last_display_position is not None
+                           else commanded_pos)
+        return self.toolhead.Coord(display_pos)
+
     def get_status(self, eventtime):
         if eventtime is None:
             eventtime = self.reactor.monotonic()
         active = self.active_input
+        blink_elapsed = max(0., eventtime - self.display_blink_epoch)
         return {
             'enabled': self.enabled,
             'mode': self.motion_mode,
             'display_blink': (self.enabled
-                              and bool(int(eventtime * 2.) & 1)),
+                              and bool(int(blink_elapsed
+                                           / DISPLAY_BLINK_INTERVAL) & 1)),
+            'position': self._get_display_position(eventtime),
             'active': active is not None,
             'axis': "" if active is None else "xyze"[active.axis],
             'direction': 0 if active is None else active.direction,
@@ -283,11 +347,13 @@ class JogButtons:
         if self.enabled == enabled:
             return
         self.enabled = enabled
+        eventtime = self.reactor.monotonic()
+        self.display_blink_epoch = eventtime
         if not enabled and self.dispatch_active:
             self.dispatch.trigger()
         guard_time = self.reactor.NEVER
         if enabled:
-            guard_time = self.reactor.monotonic() + MODE_GUARD_INTERVAL
+            guard_time = eventtime + MODE_GUARD_INTERVAL
         self.reactor.update_timer(self.mode_guard_timer, guard_time)
         if enabled:
             menu = self.printer.lookup_object('menu', None)
@@ -305,6 +371,7 @@ class JogButtons:
         if self.motion_mode == mode:
             return
         self.motion_mode = mode
+        self.display_blink_epoch = self.reactor.monotonic()
         display = self.printer.lookup_object('display', None)
         if display is not None:
             display.request_redraw()
@@ -317,22 +384,38 @@ class JogButtons:
         beeper_mcu = beeper.mcu_pin.get_mcu()
         min_schedule_time = beeper_mcu.min_schedule_time()
         eventtime = self.reactor.monotonic() + min_schedule_time
-        print_time = max(
-            beeper_mcu.estimated_print_time(eventtime),
-            beeper.last_print_time + min_schedule_time)
-        cycle_time = 1. / self.mode_beep_frequency
+        min_print_time = beeper_mcu.estimated_print_time(eventtime)
+        if self.mode_beeper_type == 'pwm':
+            print_time = max(
+                min_print_time,
+                beeper.last_print_time + min_schedule_time)
+            cycle_time = 1. / self.mode_beep_frequency
+        else:
+            print_time = max(
+                min_print_time, beeper.gcrq.next_min_flush_time)
         beep_count = 1 if enabled else 2
         try:
             for beep_index in range(beep_count):
-                beeper.mcu_pin.set_pwm_cycle(
-                    print_time, self.mode_beep_value, cycle_time)
+                if self.mode_beeper_type == 'pwm':
+                    beeper.mcu_pin.set_pwm_cycle(
+                        print_time, self.mode_beep_value, cycle_time)
+                else:
+                    beeper.mcu_pin.set_digital(print_time, 1.)
                 print_time += self.mode_beep_duration
-                beeper.mcu_pin.set_pwm_cycle(print_time, 0., cycle_time)
+                if self.mode_beeper_type == 'pwm':
+                    beeper.mcu_pin.set_pwm_cycle(print_time, 0., cycle_time)
+                else:
+                    beeper.mcu_pin.set_digital(print_time, 0.)
                 if beep_index + 1 < beep_count:
                     print_time += self.mode_beep_gap
-            beeper.last_print_time = print_time
             beeper.last_value = 0.
-            beeper.last_cycle_time = cycle_time
+            if self.mode_beeper_type == 'pwm':
+                beeper.last_print_time = print_time
+                beeper.last_cycle_time = cycle_time
+            else:
+                beeper.gcrq.next_min_flush_time = max(
+                    beeper.gcrq.next_min_flush_time,
+                    print_time + min_schedule_time)
         except Exception:
             logging.exception("Unable to signal manual jog mode change")
 

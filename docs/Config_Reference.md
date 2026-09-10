@@ -3715,7 +3715,9 @@ Manual mode can also be controlled with `SET_JOG_MODE ENABLE=<0|1>` or the
 `jog_buttons/set_mode` API endpoint with an `enable` boolean parameter. Both
 interfaces accept an optional `mode` of `continuous` or `step`. The
 `jog_buttons.enabled` and `jog_buttons.mode` status fields report the current
-state. Starting another toolhead operation or disabling the steppers
+state. While a jog is active, `jog_buttons.position` reports the expected
+current XYZ position reconstructed from the step history at the estimated MCU
+time. Starting another toolhead operation or disabling the steppers
 automatically disables manual mode.
 
 ```
@@ -3759,10 +3761,14 @@ automatically disables manual mode.
 #   to start another segment. This must not exceed the active extruder's
 #   max_extrude_only_distance. The default is 25 mm.
 #mode_beeper:
-#   Name of an optional pwm_cycle_time section used to signal manual-mode
-#   changes. Enabling produces one short beep and disabling produces two.
+#   Name of an optional pwm_cycle_time section or non-PWM output_pin section
+#   used to signal manual-mode changes. Enabling produces one short beep and
+#   disabling produces two. A digital output_pin is suitable for a
+#   fixed-frequency buzzer.
 #mode_beep_frequency: 2000.0
-#   Frequency of the mode signal in Hz. The default is 2000 Hz.
+#   Frequency of the mode signal in Hz when mode_beeper names a
+#   pwm_cycle_time section. It is ignored for a digital output_pin. The
+#   default is 2000 Hz.
 #mode_beep_duration: 0.035
 #   Duration of each mode signal beep in seconds. The default is 0.035 seconds.
 #mode_beep_gap: 0.040
