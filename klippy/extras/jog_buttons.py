@@ -81,9 +81,12 @@ class JogButtons:
         if ok_pin is not None:
             self.ok_input = JogInput('ok', None, 0, 0.)
             self.inputs_by_name['ok'] = self.ok_input
+        emergency_pin = config.get('emergency_stop_pin', None)
         self.virtual_callbacks = {
             name: [] for name in self.inputs_by_name
         }
+        if emergency_pin is not None:
+            self.virtual_callbacks['emergency_stop'] = []
         ppins = self.printer.lookup_object('pins')
         self.pin_error = ppins.error
         ppins.register_chip('jog_buttons', self)
@@ -96,7 +99,6 @@ class JogButtons:
         if self.ok_input is not None:
             buttons.register_debounce_button(
                 ok_pin, self._ok_button_event, config)
-        emergency_pin = config.get('emergency_stop_pin', None)
         if emergency_pin is not None:
             buttons.register_debounce_button(
                 emergency_pin, self._emergency_stop_event, config)
@@ -195,6 +197,7 @@ class JogButtons:
         if state and not self.printer.is_shutdown():
             self.printer.invoke_shutdown(
                 "Shutdown due to jog emergency-stop button")
+        self._emit_virtual(eventtime, 'emergency_stop', state)
 
     def get_status(self, eventtime):
         active = self.active_input
