@@ -1,4 +1,4 @@
-# Continuous toolhead jogging from physical buttons
+# Guarded continuous and step jogging from physical buttons
 #
 # Copyright (C) 2026  Timo H.
 #
@@ -47,11 +47,26 @@ class JogButtons:
         self.kin_steppers = self.trigger_steppers = []
         self.is_ready = self.enabled = self.dispatch_active = False
         self.active_input = None
+        self.motion_mode = 'continuous'
         self.last_reject = ""
         self.enable_hold_time = config.getfloat(
             'enable_hold_time', 2., minval=2.)
+        self.step_distance = config.getfloat(
+            'step_distance', 1., above=0.)
+        self.extrude_step_distance = config.getfloat(
+            'extrude_step_distance', self.step_distance, above=0.)
         self.extrude_distance = config.getfloat(
             'extrude_distance', 25., above=0.)
+        self.mode_beeper_name = config.get('mode_beeper', None)
+        self.mode_beep_frequency = config.getfloat(
+            'mode_beep_frequency', 2000., above=0.)
+        self.mode_beep_duration = config.getfloat(
+            'mode_beep_duration', .035, above=0.)
+        self.mode_beep_gap = config.getfloat(
+            'mode_beep_gap', .040, minval=0.)
+        self.mode_beep_value = config.getfloat(
+            'mode_beep_value', .5, minval=0., maxval=1.)
+        self.mode_beeper = None
         xy_speed = config.getfloat('xy_speed', 40., above=0.)
         z_speed = config.getfloat('z_speed', 5., above=0.)
         extrude_speed = config.getfloat('extrude_speed', 5., above=0.)
@@ -179,6 +194,17 @@ class JogButtons:
         self.pause_resume = self.printer.lookup_object('pause_resume', None)
         self.print_stats = self.printer.lookup_object('print_stats', None)
         self.virtual_sd = self.printer.lookup_object('virtual_sdcard', None)
+        if self.mode_beeper_name is not None:
+            name = 'pwm_cycle_time ' + self.mode_beeper_name
+            self.mode_beeper = self.printer.lookup_object(name, None)
+            if (self.mode_beeper is None
+                or not hasattr(self.mode_beeper, 'mcu_pin')
+                or not hasattr(self.mode_beeper.mcu_pin,
+                               'set_pwm_cycle')):
+                raise self.printer.config_error(
+                    "[jog_buttons] mode_beeper '%s' must name a"
+                    " [pwm_cycle_time] section"
+                    % (self.mode_beeper_name,))
         self.is_ready = True
 
     def _handle_shutdown(self):
@@ -200,9 +226,14 @@ class JogButtons:
         self._emit_virtual(eventtime, 'emergency_stop', state)
 
     def get_status(self, eventtime):
+        if eventtime is None:
+            eventtime = self.reactor.monotonic()
         active = self.active_input
         return {
             'enabled': self.enabled,
+            'mode': self.motion_mode,
+            'display_blink': (self.enabled
+                              and bool(int(eventtime * 2.) & 1)),
             'active': active is not None,
             'axis': "" if active is None else "xyze"[active.axis],
             'direction': 0 if active is None else active.direction,
@@ -210,7 +241,8 @@ class JogButtons:
         }
 
     def _job_reject_reason(self, eventtime, check_gcode=True,
-                           check_idle_state=True):
+                           check_idle_state=True,
+                           allow_toolhead_completion=False):
         if not self.is_ready or self.printer.is_shutdown():
             return "printer is not ready"
         if check_gcode and self.gcode_mutex.test():
@@ -228,7 +260,9 @@ class JogButtons:
             return "the printer is not idle"
         print_time, est_print_time, lookahead_empty = (
             self.toolhead.check_busy(eventtime))
-        if not lookahead_empty or print_time > est_print_time + 0.001:
+        if (not lookahead_empty
+            or (not allow_toolhead_completion
+                and print_time > est_print_time + 0.001)):
             return "the toolhead is busy"
         homed_axes = self.toolhead.get_status(eventtime)['homed_axes']
         if any(axis not in homed_axes for axis in 'xyz'):
@@ -265,6 +299,42 @@ class JogButtons:
         if reason is not None:
             logging.info("Manual jog mode disabled: %s", reason)
         self.printer.send_event('jog_buttons:mode_changed', enabled)
+        self._signal_mode_change(enabled)
+
+    def _set_motion_mode(self, mode):
+        if self.motion_mode == mode:
+            return
+        self.motion_mode = mode
+        display = self.printer.lookup_object('display', None)
+        if display is not None:
+            display.request_redraw()
+        self.printer.send_event('jog_buttons:motion_mode_changed', mode)
+
+    def _signal_mode_change(self, enabled):
+        if self.mode_beeper is None or self.printer.is_shutdown():
+            return
+        beeper = self.mode_beeper
+        beeper_mcu = beeper.mcu_pin.get_mcu()
+        min_schedule_time = beeper_mcu.min_schedule_time()
+        eventtime = self.reactor.monotonic() + min_schedule_time
+        print_time = max(
+            beeper_mcu.estimated_print_time(eventtime),
+            beeper.last_print_time + min_schedule_time)
+        cycle_time = 1. / self.mode_beep_frequency
+        beep_count = 1 if enabled else 2
+        try:
+            for beep_index in range(beep_count):
+                beeper.mcu_pin.set_pwm_cycle(
+                    print_time, self.mode_beep_value, cycle_time)
+                print_time += self.mode_beep_duration
+                beeper.mcu_pin.set_pwm_cycle(print_time, 0., cycle_time)
+                if beep_index + 1 < beep_count:
+                    print_time += self.mode_beep_gap
+            beeper.last_print_time = print_time
+            beeper.last_value = 0.
+            beeper.last_cycle_time = cycle_time
+        except Exception:
+            logging.exception("Unable to signal manual jog mode change")
 
     def _mode_guard_event(self, eventtime):
         if not self.enabled:
@@ -272,20 +342,23 @@ class JogButtons:
         if self.active_input is not None:
             return eventtime + MODE_GUARD_INTERVAL
         reason = self._job_reject_reason(
-            eventtime, check_gcode=True, check_idle_state=False)
+            eventtime, check_gcode=True, check_idle_state=False,
+            allow_toolhead_completion=True)
         if reason is not None:
             self.last_reject = reason
             self._set_enabled(False, reason)
             return self.reactor.NEVER
         return eventtime + MODE_GUARD_INTERVAL
 
-    def _try_enable(self, eventtime, check_gcode=True):
+    def _try_enable(self, eventtime, check_gcode=True, mode=None):
         reason = self._activation_reject_reason(
             eventtime, check_gcode=check_gcode)
         if reason is not None:
             self.last_reject = reason
             return reason
         self.last_reject = ""
+        if mode is not None:
+            self._set_motion_mode(mode)
         self._set_enabled(True)
         return None
 
@@ -307,7 +380,8 @@ class JogButtons:
         if self.active_input is not None:
             return
         reason = self._job_reject_reason(
-            eventtime, check_gcode=True, check_idle_state=False)
+            eventtime, check_gcode=True, check_idle_state=False,
+            allow_toolhead_completion=True)
         if reason is not None:
             self.last_reject = reason
             self._set_enabled(False, reason)
@@ -321,7 +395,10 @@ class JogButtons:
                 self.last_reject = "active extruder is below minimum temp"
                 return
         with self.gcode_mutex:
-            self._run_jog(jog_input)
+            if self.motion_mode == 'step':
+                self._run_step_jog(jog_input)
+            else:
+                self._run_jog(jog_input)
 
     def _ok_button_event(self, eventtime, state):
         ok_input = self.ok_input
@@ -345,6 +422,11 @@ class JogButtons:
         if ok_input.forwarded:
             self._emit_virtual(eventtime, 'ok', False)
             ok_input.forwarded = False
+        elif (not self.ok_hold_handled and not self.ok_hold_target
+              and self.enabled):
+            mode = ('step' if self.motion_mode == 'continuous'
+                    else 'continuous')
+            self._set_motion_mode(mode)
         elif not self.ok_hold_handled and self.ok_hold_target:
             self._emit_virtual(eventtime, 'ok', True)
             self.reactor.register_callback(
@@ -373,14 +455,21 @@ class JogButtons:
     cmd_SET_JOG_MODE_help = "Enable or disable guarded manual jogging"
     def cmd_SET_JOG_MODE(self, gcmd):
         enable = bool(gcmd.get_int('ENABLE', minval=0, maxval=1))
+        mode = gcmd.get('MODE', None)
+        if mode is not None:
+            mode = mode.lower()
+            if mode not in ('continuous', 'step'):
+                raise gcmd.error("MODE must be CONTINUOUS or STEP")
         if enable:
             reason = self._try_enable(
-                self.reactor.monotonic(), check_gcode=False)
+                self.reactor.monotonic(), check_gcode=False, mode=mode)
             if reason is not None:
                 raise gcmd.error("Unable to enable manual jog mode: %s"
                                   % (reason,))
         else:
             self._set_enabled(False)
+            if mode is not None:
+                self._set_motion_mode(mode)
         state = "enabled" if self.enabled else "disabled"
         gcmd.respond_info("Manual jog mode %s" % (state,))
 
@@ -388,13 +477,22 @@ class JogButtons:
         enable = web_request.get('enable', types=(bool, int))
         if enable not in (False, True, 0, 1):
             raise web_request.error("enable must be true or false")
+        mode = web_request.get('mode', None, types=(str,))
+        if mode is not None:
+            mode = mode.lower()
+            if mode not in ('continuous', 'step'):
+                raise web_request.error(
+                    "mode must be 'continuous' or 'step'")
         if enable:
-            reason = self._try_enable(self.reactor.monotonic())
+            reason = self._try_enable(
+                self.reactor.monotonic(), mode=mode)
             if reason is not None:
                 raise web_request.error(
                     "Unable to enable manual jog mode: %s" % (reason,))
         else:
             self._set_enabled(False)
+            if mode is not None:
+                self._set_motion_mode(mode)
         web_request.send(self.get_status(self.reactor.monotonic()))
 
     def _calc_halt_position(self, start_kin_pos, start_mcu_pos):
@@ -431,6 +529,41 @@ class JogButtons:
                 allow_extra_axes=True)
             if completion.test():
                 break
+
+    def _run_step_jog(self, jog_input):
+        axis = jog_input.axis
+        current_pos = self.toolhead.get_position()
+        distance = (self.extrude_step_distance if axis == 3
+                    else self.step_distance)
+        if axis < 3:
+            status = self.toolhead.get_status(self.reactor.monotonic())
+            limit = (status['axis_maximum'][axis]
+                     if jog_input.direction > 0
+                     else status['axis_minimum'][axis])
+            remaining = (limit - current_pos[axis]) * jog_input.direction
+            if remaining < 0.000000001:
+                self.last_reject = "axis is at its software limit"
+                return
+            distance = min(distance, remaining)
+        target = current_pos[axis] + jog_input.direction * distance
+        coord = [None] * len(current_pos)
+        coord[axis] = target
+        self.active_input = jog_input
+        self.last_reject = ""
+        error = None
+        try:
+            self.toolhead.manual_move(coord, jog_input.speed)
+            self.toolhead.wait_moves()
+        except self.printer.command_error as e:
+            error = str(e)
+        except Exception:
+            logging.exception("Button step jog failed")
+            error = "internal step jog error"
+        finally:
+            self.active_input = None
+        if error is not None and not self.printer.is_shutdown():
+            self.last_reject = error
+            self.gcode.respond_info("Jog stopped: %s" % (error,))
 
     def _run_jog(self, jog_input):
         axis = jog_input.axis

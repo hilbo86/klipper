@@ -3867,12 +3867,15 @@ pin:
 
 ### [jog_buttons]
 
-Continuous jogging of homed toolhead axes and the active extruder with physical
-buttons. Manual mode may only be enabled after all XYZ axes are homed and while
-the printer and G-Code processor are idle. Hold the configured OK button for at
-least two seconds to enable or disable manual mode. Axis moves run toward their
-configured software limit and stop when the button is released. Extruder moves
-are allowed only after the active extruder reaches its `min_extrude_temp`.
+Continuous or fixed-distance step jogging of homed toolhead axes and the active
+extruder with physical buttons. Manual mode may only be enabled after all XYZ
+axes are homed and while the printer and G-Code processor are idle. Hold the
+configured OK button for at least two seconds to enable or disable manual mode.
+While manual mode is active, a short OK press switches between `continuous` and
+`step` mode. Continuous axis moves run toward their configured software limit
+and stop when the button is released. Step moves advance once per button press.
+Extruder moves are allowed only after the active extruder reaches its
+`min_extrude_temp`.
 
 When manual mode is disabled, physical button events are forwarded through
 logical pins named `jog_buttons:<option-name-without-_pin>`. For example,
@@ -3887,10 +3890,11 @@ also invokes an immediate Klipper shutdown independently of the virtual pin
 consumer, manual mode, homing state, and G-Code processor availability.
 
 Manual mode can also be controlled with `SET_JOG_MODE ENABLE=<0|1>` or the
-`jog_buttons/set_mode` API endpoint with an `enable` boolean parameter. The
-`jog_buttons.enabled` status field reports its current state. Starting another
-toolhead operation or disabling the steppers automatically disables manual
-mode.
+`jog_buttons/set_mode` API endpoint with an `enable` boolean parameter. Both
+interfaces accept an optional `mode` of `continuous` or `step`. The
+`jog_buttons.enabled` and `jog_buttons.mode` status fields report the current
+state. Starting another toolhead operation or disabling the steppers
+automatically disables manual mode.
 
 ```
 [jog_buttons]
@@ -3915,6 +3919,13 @@ mode.
 #enable_hold_time: 2.0
 #   Duration of an OK-button hold which toggles manual mode. The minimum and
 #   default are two seconds.
+#step_distance: 1.0
+#   Distance in mm moved by an X, Y, or Z button press in step mode. A step is
+#   shortened when necessary to remain within the axis software limit. The
+#   default is 1 mm.
+#extrude_step_distance:
+#   Extrusion distance in mm per button press in step mode. The default is the
+#   configured step_distance.
 #xy_speed: 40.0
 #   Jog speed for the X and Y axes, in mm/s. The default is 40 mm/s.
 #z_speed: 5.0
@@ -3925,6 +3936,17 @@ mode.
 #   Length of each uninterrupted extruder jog segment. The button remains held
 #   to start another segment. This must not exceed the active extruder's
 #   max_extrude_only_distance. The default is 25 mm.
+#mode_beeper:
+#   Name of an optional pwm_cycle_time section used to signal manual-mode
+#   changes. Enabling produces one short beep and disabling produces two.
+#mode_beep_frequency: 2000.0
+#   Frequency of the mode signal in Hz. The default is 2000 Hz.
+#mode_beep_duration: 0.035
+#   Duration of each mode signal beep in seconds. The default is 0.035 seconds.
+#mode_beep_gap: 0.040
+#   Gap between the two disable beeps in seconds. The default is 0.040 seconds.
+#mode_beep_value: 0.5
+#   Normalized PWM duty value used while beeping. The default is 0.5.
 #debounce_delay: 0.0
 #   Additional button debounce time in seconds. The default is 0.
 ```
