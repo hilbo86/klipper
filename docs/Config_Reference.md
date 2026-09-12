@@ -2491,13 +2491,18 @@ TrapQ data. See [Extrusion force monitoring](Extrusion_Force.md).
 
 ### [extrusion_force_profile]
 
-One section is configured for each material/extruder/hotend/nozzle combination.
+One section is configured for each material/hotend/nozzle combination. A
+profile may be shared by multiple equivalent extruders.
 
 ```
 [extrusion_force_profile <name>]
-extruder:
+extruder: extruder
+#   A comma-separated list of compatible extruders. The first name remains
+#   the compatibility default for status consumers. Commands that perform a
+#   physical calibration require EXTRUDER when more than one is listed.
+#   The default is extruder.
 nozzle_diameter:
-#   These parameters must be provided.
+#   This parameter must be provided.
 #filament_diameter: 1.75
 #hotend:
 #material:

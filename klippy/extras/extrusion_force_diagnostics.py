@@ -149,14 +149,14 @@ class ExtrusionForceDiagnostics:
             profile = manager.get_active(extruder_name)
         else:
             profile = manager.get_profile(profile_name)
-            extruder_name = gcmd.get(
-                "EXTRUDER", profile.extruder if profile is not None else "")
+            extruder_name = (profile.resolve_extruder(gcmd)
+                             if profile is not None else "")
         if profile is None:
             raise gcmd.error("No matching extrusion force profile")
-        if profile.extruder != extruder_name:
+        if not profile.supports_extruder(extruder_name):
             raise gcmd.error(
-                "Profile '%s' belongs to '%s'"
-                % (profile.name, profile.extruder))
+                "Profile '%s' does not apply to extruder '%s'"
+                % (profile.name, extruder_name))
         extruder = self.printer.lookup_object(extruder_name)
         return profile, extruder_name, extruder
 

@@ -28,12 +28,16 @@ from recorded data before enabling either module.
 3. Record the `extrusion_force/dump` stream during safe test extrusions. Confirm
    that force follows `flow_mm3_s`, baseline remains stable during extrusion,
    and `EXTRUSION_STEADY` is plausible.
-4. Create one `[extrusion_force_profile <name>]` per material/extruder/hotend/
-   nozzle combination and run `FORCE_FLOW_CALIBRATE` with conservative
-   `ABORT_FORCE`, flows, and temperatures.
+4. Create one `[extrusion_force_profile <name>]` per material/hotend/nozzle
+   combination. Equivalent tools can share it with a comma-separated
+   `extruder` list; use a single-extruder profile only for a measured hardware
+   difference. Run `FORCE_FLOW_CALIBRATE` with conservative `ABORT_FORCE`,
+   flows, and temperatures. Specify `EXTRUDER` when calibrating a shared
+   profile.
 5. Review the generated points and recommended limits, then run `SAVE_CONFIG`.
    Select profiles from filament start G-code with
-   `SET_EXTRUSION_FORCE_PROFILE`.
+   `SET_EXTRUSION_FORCE_PROFILE`. Without `EXTRUDER`, selecting a shared
+   profile assigns it to every extruder listed in that profile.
 
 Calibration data uses piecewise-linear flow interpolation followed by linear
 temperature interpolation. Values outside the calibrated domain return no

@@ -72,7 +72,16 @@ class ForceProfile:
         if len(name_parts) != 2:
             raise config.error("extrusion_force_profile requires a name")
         self.name = name_parts[1]
-        self.extruder = config.get("extruder", "extruder")
+        self.extruders = config.getlist("extruder", ("extruder",))
+        if not self.extruders or any(not name for name in self.extruders):
+            raise config.error(
+                "extrusion_force_profile requires at least one extruder")
+        if len(set(self.extruders)) != len(self.extruders):
+            raise config.error(
+                "Duplicate extruder in [%s]" % (self.section_name,))
+        # Keep the singular attribute for compatibility with existing status
+        # consumers. Commands that operate hardware use resolve_extruder().
+        self.extruder = self.extruders[0]
         self.nozzle_diameter = config.getfloat("nozzle_diameter", above=0.0)
         self.filament_diameter = config.getfloat(
             "filament_diameter", 1.75, above=0.0)
@@ -269,10 +278,29 @@ class ForceProfile:
         configfile.set(self.section_name, "response_tau_fall",
                        "%.6f" % (self.response_tau_fall,))
 
+    def supports_extruder(self, extruder):
+        return extruder in self.extruders
+
+    def resolve_extruder(self, gcmd):
+        extruder = gcmd.get("EXTRUDER", None)
+        if extruder is None:
+            if len(self.extruders) != 1:
+                raise gcmd.error(
+                    "Profile '%s' applies to multiple extruders (%s); "
+                    "specify EXTRUDER"
+                    % (self.name, ", ".join(self.extruders)))
+            return self.extruder
+        if not self.supports_extruder(extruder):
+            raise gcmd.error(
+                "Profile '%s' does not apply to extruder '%s' (allowed: %s)"
+                % (self.name, extruder, ", ".join(self.extruders)))
+        return extruder
+
     def get_status(self, eventtime):
         return {
             "name": self.name,
             "extruder": self.extruder,
+            "extruders": list(self.extruders),
             "material": self.material,
             "hotend": self.hotend,
             "nozzle_diameter": self.nozzle_diameter,
@@ -304,8 +332,9 @@ class ForceProfileManager:
             raise self.printer.config_error(
                 "Duplicate extrusion force profile '%s'" % (profile.name,))
         self.profiles[key] = profile
-        if profile.extruder not in self.active:
-            self.active[profile.extruder] = profile
+        for extruder in profile.extruders:
+            if extruder not in self.active:
+                self.active[extruder] = profile
 
     def get_profile(self, name):
         if name is None:
@@ -320,17 +349,24 @@ class ForceProfileManager:
         profile = self.get_profile(name)
         if profile is None:
             raise gcmd.error("Unknown extrusion force profile '%s'" % (name,))
-        extruder = gcmd.get("EXTRUDER", profile.extruder)
-        if extruder != profile.extruder:
-            raise gcmd.error(
-                "Profile '%s' belongs to extruder '%s'"
-                % (profile.name, profile.extruder))
-        self.active[extruder] = profile
-        self.printer.send_event(
-            "extrusion_force:profile_changed", extruder, profile.name)
+        extruder = gcmd.get("EXTRUDER", None)
+        if extruder is None:
+            extruders = profile.extruders
+        else:
+            if not profile.supports_extruder(extruder):
+                raise gcmd.error(
+                    "Profile '%s' does not apply to extruder '%s' "
+                    "(allowed: %s)"
+                    % (profile.name, extruder,
+                       ", ".join(profile.extruders)))
+            extruders = (extruder,)
+        for extruder in extruders:
+            self.active[extruder] = profile
+            self.printer.send_event(
+                "extrusion_force:profile_changed", extruder, profile.name)
         gcmd.respond_info(
             "Extrusion force profile for %s: %s"
-            % (extruder, profile.name))
+            % (", ".join(extruders), profile.name))
 
 
 def load_config_prefix(config):

@@ -82,11 +82,7 @@ class ExtrusionForceCalibration:
         if profile is None:
             raise gcmd.error(
                 "Unknown extrusion force profile '%s'" % (profile_name,))
-        extruder_name = gcmd.get("EXTRUDER", profile.extruder)
-        if extruder_name != profile.extruder:
-            raise gcmd.error(
-                "Profile '%s' belongs to extruder '%s'"
-                % (profile.name, profile.extruder))
+        extruder_name = profile.resolve_extruder(gcmd)
         extruder = self.printer.lookup_object(extruder_name, None)
         if extruder is None:
             raise gcmd.error("Unknown extruder '%s'" % (extruder_name,))
@@ -112,7 +108,7 @@ class ExtrusionForceCalibration:
             "ACTIVATE_EXTRUDER EXTRUDER=%s" % (extruder_name,))
         return toolhead
 
-    def _parse_temperatures(self, gcmd, profile):
+    def _parse_temperatures(self, gcmd, profile, extruder):
         value = gcmd.get("TEMPERATURES", None)
         if value is None:
             raise gcmd.error("TEMPERATURES must be specified")
@@ -122,7 +118,7 @@ class ExtrusionForceCalibration:
             raise gcmd.error("Invalid TEMPERATURES list")
         if not temperatures:
             raise gcmd.error("TEMPERATURES must not be empty")
-        heater = self.printer.lookup_object(profile.extruder).get_heater()
+        heater = extruder.get_heater()
         maximum = heater.max_temp
         if profile.max_material_temperature is not None:
             maximum = min(maximum, profile.max_material_temperature)
@@ -234,7 +230,8 @@ class ExtrusionForceCalibration:
         try:
             toolhead = self._check_prerequisites(
                 gcmd, monitor, extruder_name)
-            temperatures = self._parse_temperatures(gcmd, profile)
+            temperatures = self._parse_temperatures(
+                gcmd, profile, extruder)
             flow_start = gcmd.get_float("FLOW_START", above=0.0)
             flow_step = gcmd.get_float("FLOW_STEP", above=0.0)
             flow_max = gcmd.get_float("FLOW_MAX", minval=flow_start)

@@ -13,7 +13,8 @@ from klippy.extras.extrusion_force_monitor import (
     BaselineTracker, EXTRUSION_STEADY, EXTRUSION_TRANSIENT,
     ExponentialFilter, ExtrusionForceMonitor, ExtrusionForceProcessor,
     MotionClassifier, TrapQMotionProvider, replay_rows)
-from klippy.extras.extrusion_force_profile import ForceProfile, detect_knee
+from klippy.extras.extrusion_force_profile import (
+    ForceProfile, ForceProfileManager, detect_knee)
 
 
 class FakeProfile:
@@ -128,6 +129,103 @@ class ProfileTest(unittest.TestCase):
         plateau = [(1, 100), (2, 200), (3, 300),
                    (4, 305), (5, 302), (6, 304)]
         self.assertIsNone(detect_knee(plateau))
+
+
+class ProfileExtruderAssignmentTest(unittest.TestCase):
+    class Gcmd:
+        def __init__(self, **params):
+            self.params = params
+            self.responses = []
+
+        def get(self, name, default=None):
+            return self.params.get(name, default)
+
+        def error(self, message):
+            return ValueError(message)
+
+        def respond_info(self, message):
+            self.responses.append(message)
+
+    class Printer:
+        def __init__(self):
+            self.events = []
+
+        def config_error(self, message):
+            return ValueError(message)
+
+        def send_event(self, event, *args):
+            self.events.append((event,) + args)
+
+    def make_profile(self, name, extruders):
+        profile = object.__new__(ForceProfile)
+        profile.name = name
+        profile.extruders = tuple(extruders)
+        profile.extruder = profile.extruders[0]
+        return profile
+
+    def make_manager(self):
+        manager = object.__new__(ForceProfileManager)
+        manager.printer = self.Printer()
+        manager.profiles = {}
+        manager.active = {}
+        return manager
+
+    def test_resolve_requires_extruder_for_shared_profile(self):
+        profile = self.make_profile("shared", ("extruder", "extruder1"))
+        with self.assertRaisesRegex(ValueError, "specify EXTRUDER"):
+            profile.resolve_extruder(self.Gcmd())
+        self.assertEqual(
+            profile.resolve_extruder(self.Gcmd(EXTRUDER="extruder1")),
+            "extruder1")
+        with self.assertRaisesRegex(ValueError, "does not apply"):
+            profile.resolve_extruder(self.Gcmd(EXTRUDER="extruder2"))
+
+    def test_single_profile_keeps_implicit_extruder(self):
+        profile = self.make_profile("single", ("extruder",))
+        self.assertEqual(profile.resolve_extruder(self.Gcmd()), "extruder")
+
+    def test_shared_profile_is_initial_default_for_each_extruder(self):
+        manager = self.make_manager()
+        profile = self.make_profile(
+            "shared", ("extruder", "extruder1"))
+        manager.add_profile(profile)
+        self.assertIs(manager.get_active("extruder"), profile)
+        self.assertIs(manager.get_active("extruder1"), profile)
+
+    def test_set_without_extruder_assigns_all_supported_extruders(self):
+        manager = self.make_manager()
+        initial = self.make_profile(
+            "initial", ("extruder", "extruder1"))
+        selected = self.make_profile(
+            "selected", ("extruder", "extruder1"))
+        manager.add_profile(initial)
+        manager.add_profile(selected)
+        gcmd = self.Gcmd(PROFILE="selected")
+        manager.cmd_SET_PROFILE(gcmd)
+        self.assertIs(manager.get_active("extruder"), selected)
+        self.assertIs(manager.get_active("extruder1"), selected)
+        self.assertEqual(len(manager.printer.events), 2)
+
+    def test_set_with_extruder_changes_only_requested_extruder(self):
+        manager = self.make_manager()
+        initial = self.make_profile(
+            "initial", ("extruder", "extruder1"))
+        selected = self.make_profile(
+            "selected", ("extruder", "extruder1"))
+        manager.add_profile(initial)
+        manager.add_profile(selected)
+        manager.cmd_SET_PROFILE(self.Gcmd(
+            PROFILE="selected", EXTRUDER="extruder1"))
+        self.assertIs(manager.get_active("extruder"), initial)
+        self.assertIs(manager.get_active("extruder1"), selected)
+
+    def test_set_rejects_extruder_outside_profile(self):
+        manager = self.make_manager()
+        profile = self.make_profile("shared", ("extruder", "extruder1"))
+        manager.add_profile(profile)
+        with self.assertRaisesRegex(ValueError, "does not apply"):
+            manager.cmd_SET_PROFILE(self.Gcmd(
+                PROFILE="shared", EXTRUDER="extruder2"))
 
 
 class ResponseTest(unittest.TestCase):

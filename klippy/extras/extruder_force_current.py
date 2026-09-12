@@ -176,11 +176,7 @@ class ExtruderForceCurrentCalibration:
         if profile is None:
             raise gcmd.error(
                 "Unknown extrusion force profile '%s'" % (profile_name,))
-        extruder_name = gcmd.get("EXTRUDER", profile.extruder)
-        if extruder_name != profile.extruder:
-            raise gcmd.error(
-                "Profile '%s' belongs to '%s'"
-                % (profile.name, profile.extruder))
+        extruder_name = profile.resolve_extruder(gcmd)
         extruder = self.printer.lookup_object(extruder_name)
         adapter = ExtruderDriverAdapter(
             self.printer, self.gcode, extruder_name, self.driver_name)

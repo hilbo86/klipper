@@ -1380,8 +1380,9 @@ console. Useful for debugging and testing.
 
 #### SET_EXTRUSION_FORCE_PROFILE
 `SET_EXTRUSION_FORCE_PROFILE PROFILE=<name> [EXTRUDER=<name>]`: Select the
-force profile used for an extruder. A profile can only be assigned to the
-extruder named in that profile.
+force profile used for an extruder. Without `EXTRUDER`, the profile is assigned
+to every extruder in its configured `extruder` list. With `EXTRUDER`, only that
+compatible extruder is changed.
 
 ### [extrusion_force_calibration]
 
@@ -1391,13 +1392,15 @@ TEMPERATURES=<t1,t2,...> FLOW_START=<flow> FLOW_STEP=<flow>
 FLOW_MAX=<flow> [SETTLE_TIME=<seconds>] [MEASURE_TIME=<seconds>]
 [ABORT_FORCE=<grams>]`: Record steady-state force curves and stage their
 profile data for `SAVE_CONFIG`. The nozzle must be homed, clear of the bed,
-hot enough to extrude, and protected by a configured force ceiling.
+hot enough to extrude, and protected by a configured force ceiling. `EXTRUDER`
+is required when the profile is configured for multiple extruders.
 
 #### FORCE_RESPONSE_CALIBRATE
 `FORCE_RESPONSE_CALIBRATE PROFILE=<name> [EXTRUDER=<name>]
 TEMPERATURE=<degrees_C> FLOW_LOW=<flow> FLOW_HIGH=<flow>
 [DURATION=<seconds>] [ABORT_FORCE=<grams>]`: Measure rise and fall response
-time constants and stage them for `SAVE_CONFIG`.
+time constants and stage them for `SAVE_CONFIG`. `EXTRUDER` is required when
+the profile is configured for multiple extruders.
 
 ### [z_sense_offset]
 
@@ -1431,7 +1434,8 @@ FLOW_MAX=<flow> FLOW_STEP=<flow> [REPEATS=<count>]
 [REQUIRED_FORCE=<grams>] [SAVE=<0|1>]`: Measure a force/current curve and
 recommend the lowest run current with configured reserve. The original current
 and temperature target are restored on every exit. `SAVE=1` only stages the
-result; it does not run `SAVE_CONFIG`.
+result; it does not run `SAVE_CONFIG`. `EXTRUDER` is required when the profile
+is configured for multiple extruders.
 
 ### [extrusion_force_control]
 
@@ -1446,7 +1450,7 @@ loop. Temperature assistance requires speed control.
 `EXTRUSION_FORCE_DIAGNOSTIC [PROFILE=<name>] [EXTRUDER=<name>]
 TEMPERATURE=<degrees_C> FLOW=<mm^3/s> LENGTH=<mm>
 ABORT_FORCE=<grams>`: Run a reference extrusion and report measured versus
-profile force.
+profile force. When `PROFILE` names a shared profile, `EXTRUDER` is required.
 
 #### EXTRUSION_FORCE_PA_ANALYZE
 `EXTRUSION_FORCE_PA_ANALYZE [PROFILE=<name>] [EXTRUDER=<name>]
@@ -1454,7 +1458,8 @@ PA_VALUES=<v1,v2,...> TEMPERATURE=<degrees_C> FLOW_LOW=<flow>
 FLOW_HIGH=<flow> [SEGMENT_TIME=<seconds>] ABORT_FORCE=<grams>`: Experimental
 force-response comparison for several pressure-advance values. It restores the
 original PA value, reports only a range for subsequent visual testing, and
-never writes configuration.
+never writes configuration. When `PROFILE` names a shared profile, `EXTRUDER`
+is required.
 
 
 ### [query_adc]
