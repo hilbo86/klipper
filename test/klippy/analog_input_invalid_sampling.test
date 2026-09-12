@@ -1,0 +1,4 @@
+# Analog input sampling must complete before its report interval
+CONFIG analog_input_invalid_sampling.cfg
+DICTIONARY atmega2560.dict
+SHOULD_FAIL

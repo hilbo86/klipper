@@ -19,6 +19,17 @@ The following information is available in
   angle sensor is a tle5012b chip and if measurements are in progress
   (otherwise it reports `None`).
 
+## analog_input
+
+The following information is available in
+[analog_input some_name](Config_Reference.md#analog_input-my_analog_input)
+objects:
+- `value`: The latest scaled analog input value, rounded to the configured
+  number of decimal places.
+- `unit`: The configured unit for the value.
+- `decimal_places`: The configured number of decimal places clients should
+  use when displaying the value.
+
 ## bed_mesh
 
 The following information is available in the
@@ -233,8 +244,10 @@ The following information is available in the `gcode_move` object
   override and, for example, 2.0 would double requested extrusions.
 - `absolute_coordinates`: This returns True if in `G90` absolute
   coordinate mode or False if in `G91` relative mode.
-- `absolute_extrude`: This returns True if in `M82` absolute extrude
-  mode or False if in `M83` relative mode.
+- `absolute_extrude`: Returns True if absolute extrusions are
+  permitted. An `M83` force relative extrusion mode command causes
+  this value to return False. An `M82` command returns this value to
+  True.
 - `axis_map`: Provides a mechanism for finding the coordinate
   component for a given G-Code id that is used in `G1` commands. See
   the [Accessing Coordinates](#accessing-coordinates) section for
@@ -413,6 +426,10 @@ The following information is available in
 - `mcu_constants.<constant_name>`: Compile time constants reported by
   the micro-controller. The available constants may differ between
   micro-controller architectures and with each code revision.
+- `mcu_kconfig`: The minimal build configuration (`savedefconfig` output)
+  that the micro-controller firmware was compiled from, as reported by the
+  micro-controller. `None` if the firmware predates this feature or does not
+  provide it.
 - `last_stats.<statistics_name>`: Statistics information on the
   micro-controller connection.
 
@@ -435,6 +452,15 @@ The following information is available in
 [output_pin some_name](Config_Reference.md#output_pin) and
 [pwm_tool some_name](Config_Reference.md#pwm_tool) objects:
 - `value`: The "value" of the pin, as set by a `SET_PIN` command.
+
+## power_output
+
+The following information is available in
+[power_output some_name](Config_Reference.md#power_output) objects:
+- `value`: The "value" of the pin, as set by a `SET_PIN` command.
+- `current`: The latest measured output current in amperes, or `None` if no
+  measurement has been received yet.
+- `current_unit`: The current unit, which is always `"A"`.
 
 ## palette2
 

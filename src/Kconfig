@@ -292,9 +292,9 @@ config CANBUS_FILTER
 
 # Stepper optimizations
 config HAVE_STEPPER
-    bool
+    bool "Support stepper motion" if HAVE_LIMITED_CODE_SIZE
     depends on HAVE_GPIO
-    default y if !HAVE_LIMITED_CODE_SIZE
+    default y
 config INLINE_STEPPER_HACK
     # Enables gcc to inline stepper_event() into the main timer irq handler
     bool

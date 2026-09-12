@@ -8,7 +8,6 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
 import logging, time, math
-from mathutil import linear_regression
 
 
 DIRECTION_CHOICE_LIST={
@@ -21,6 +20,50 @@ DIRECTION_CHOICE_LIST={
   'Y-':['y',-1],
   'y-':['y',-1]
 }
+
+
+def linear_regression(x_values, y_values, extra_err=0.):
+    def mean(values):
+        return sum(values) / len(values)
+
+    def std(values, average):
+        normalizer = len(values) - 1
+        variance = sum(pow(value - average, 2) for value in values)
+        return math.sqrt(variance / normalizer)
+
+    sum_xy = 0.
+    sum_sq_v_x = 0.
+    sum_sq_v_y = 0.
+    sum_sq_x = 0.
+    mean_x = mean(x_values)
+    mean_y = mean(y_values)
+    for x_value, y_value in zip(x_values, y_values):
+        var_x = x_value - mean_x
+        var_y = y_value - mean_y
+        sum_xy += var_x * var_y
+        sum_sq_v_x += pow(var_x, 2)
+        sum_sq_v_y += pow(var_y, 2)
+        sum_sq_x += pow(x_value, 2)
+
+    point_count = len(x_values)
+    correlation = sum_xy / math.sqrt(sum_sq_v_x * sum_sq_v_y)
+    slope = correlation * (
+        std(y_values, mean_y) / std(x_values, mean_x))
+    intercept = mean_y - slope * mean_x
+
+    sum_res_sq = 0.
+    for x_value, y_value in zip(x_values, y_values):
+        residual = slope * x_value + intercept - y_value + extra_err
+        sum_res_sq += pow(residual, 2)
+    if point_count > 2 and sum_res_sq > 0.:
+        slope_error = math.sqrt(
+            sum_res_sq / (point_count - 2) / sum_sq_v_x)
+    elif sum_res_sq > 0.:
+        slope_error = math.sqrt(sum_res_sq / sum_sq_v_x)
+    else:
+        slope_error = 0.
+    intercept_error = slope_error * math.sqrt(sum_sq_x / point_count)
+    return [slope, intercept, correlation, slope_error, intercept_error]
 
 
 class WorkpartEdgeTouch:

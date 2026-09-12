@@ -1,0 +1,12 @@
+# Test power_output and configurable analog_input sampling
+CONFIG power_output.cfg
+DICTIONARY atmega2560.dict
+
+SET_PIN PIN=monitored_digital VALUE=1
+SET_PIN PIN=monitored_digital VALUE=0
+SET_PIN PIN=monitored_pwm VALUE=1
+SET_PIN PIN=monitored_pwm VALUE=0.5
+SET_PIN PIN=monitored_pwm VALUE=0
+QUERY_ADC NAME="power_output monitored_digital:current"
+QUERY_ADC NAME="power_output monitored_pwm:current"
+QUERY_ADC NAME="analog_input rail_voltage"
