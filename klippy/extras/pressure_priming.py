@@ -4,8 +4,26 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
-import statistics
+import logging
 import math
+import statistics
+
+
+def format_pressure_summary(forces, success, failure_reason=None):
+    status = "SUCCESS" if success else "FAILURE"
+    lines = [
+        "Pressure priming summary: %s after %dmm"
+        % (status, len(forces))]
+    previous = 0.0
+    for index, force in enumerate(forces):
+        delta = force - previous if index else force
+        lines.append(
+            "Nr %3d: F_mean=%7.1fg; F_delta=%+7.1fg"
+            % (index + 1, force, delta))
+        previous = force
+    if failure_reason:
+        lines.append("Reason: %s" % (failure_reason,))
+    return "\n".join(lines)
 
 
 class PressurePriming:
@@ -40,6 +58,7 @@ class PressurePriming:
         self.sample_window = None
         self.window_values = []
         self.overpressure = False
+        self.active_force_limit = None
 
     def _handle_ready(self):
         self.tool = self.printer.lookup_object("toolhead")
@@ -51,7 +70,10 @@ class PressurePriming:
             self.baseline_values.append(absolute_force)
             return
         force = absolute_force - self.baseline_force
-        if abs(force) >= self.force_safety_limit:
+        force_limit = (self.active_force_limit
+                       if self.active_force_limit is not None
+                       else self.force_safety_limit)
+        if abs(force) >= force_limit:
             self.overpressure = True
         if self.sample_window is not None:
             start_time, end_time = self.sample_window
@@ -116,10 +138,9 @@ class PressurePriming:
         threshold = gcmd.get_float(
             "THRESHOLD", self.force_threshold_default, above=0.0,
             maxval=self.force_safety_limit)
-        self.force_safety_limit = gcmd.get_float(
-            "LIMIT", self.force_safety_limit, above=threshold)
-        if self.force_safety_limit <= threshold:
-            raise gcmd.error("LIMIT must be greater than THRESHOLD")
+        force_limit = gcmd.get_float(
+            "LIMIT", self.force_safety_limit, above=threshold,
+            maxval=self.force_safety_limit)
         maximum_length = gcmd.get_float(
             "LENGTH", self.max_prime_length_default, minval=1.0,
             maxval=100.0)
@@ -128,13 +149,22 @@ class PressurePriming:
         maximum_duration = maximum_length / min(
             extruder.max_e_velocity, speed) * 2.0
         owner = "PRESSURE_PRIME"
-        if self.monitor is not None:
-            self.monitor.claim_operation(owner)
-        original_target = extruder.get_status(
-            self.reactor.monotonic())["target"]
-        self.load_cell.add_client(self._sample_callback)
+        original_target = None
+        operation_claimed = False
+        client_added = False
+        forces = []
+        success = False
+        failure_reason = None
         self.overpressure = False
+        self.active_force_limit = force_limit
         try:
+            if self.monitor is not None:
+                self.monitor.claim_operation(owner)
+                operation_claimed = True
+            original_target = extruder.get_status(
+                self.reactor.monotonic())["target"]
+            self.load_cell.add_client(self._sample_callback)
+            client_added = True
             status = self.load_cell.get_status(self.reactor.monotonic())
             if not status.get("is_calibrated", False):
                 raise gcmd.error("Load cell must be calibrated in grams")
@@ -145,8 +175,7 @@ class PressurePriming:
             heaters.set_temperature(extruder.get_heater(), target_temp, True)
             self._capture_baseline(gcmd)
             deadline = self.reactor.monotonic() + maximum_duration
-            forces = []
-            stable_hits = 0
+            previous_above_threshold = False
             for segment in range(int(math.ceil(maximum_length))):
                 if self.reactor.monotonic() >= deadline:
                     raise gcmd.error("Pressure priming timed out")
@@ -154,27 +183,59 @@ class PressurePriming:
                 forces.append(force)
                 delta_ratio = (abs(force - forces[-2]) / max(abs(force), 1.0)
                                if len(forces) > 1 else float("inf"))
-                if force >= threshold and delta_ratio < 0.15:
-                    stable_hits += 1
-                else:
-                    stable_hits = 0
+                above_threshold = force >= threshold
+                stable_pair = (above_threshold
+                               and previous_above_threshold
+                               and delta_ratio < 0.15)
+                previous_above_threshold = above_threshold
                 gcmd.respond_info(
                     "Pressure prime %dmm: %.1fg" % (segment + 1, force))
-                if stable_hits >= 1:
+                if stable_pair:
+                    success = True
                     gcmd.respond_info(
                         "Pressure priming successful after %dmm at %.1fg"
                         % (segment + 1, force))
                     return
             raise gcmd.error("Maximum pressure-prime length reached")
+        except Exception as error:
+            failure_reason = str(error)
+            raise
         finally:
             self.sample_window = None
-            self.load_cell.remove_client(self._sample_callback)
-            if self.monitor is not None:
-                self.monitor.release_operation(owner)
-            self.printer.lookup_object("heaters").set_temperature(
-                extruder.get_heater(), original_target, False)
+            cleanup_error = None
+            if client_added:
+                try:
+                    self.load_cell.remove_client(self._sample_callback)
+                except Exception as error:
+                    logging.exception(
+                        "Unable to remove pressure-prime load-cell client")
+                    cleanup_error = error
+            if operation_claimed:
+                try:
+                    self.monitor.release_operation(owner)
+                except Exception as error:
+                    logging.exception(
+                        "Unable to release pressure-prime operation lock")
+                    cleanup_error = cleanup_error or error
+            if original_target is not None:
+                try:
+                    self.printer.lookup_object("heaters").set_temperature(
+                        extruder.get_heater(), original_target, False)
+                except Exception as error:
+                    logging.exception(
+                        "Unable to restore pressure-prime heater target")
+                    cleanup_error = cleanup_error or error
             self.baseline_force = None
             self.baseline_values = []
+            self.active_force_limit = None
+            try:
+                gcmd.respond_info(format_pressure_summary(
+                    forces, success, failure_reason))
+            except Exception as error:
+                logging.exception("Unable to report pressure-prime summary")
+                cleanup_error = cleanup_error or error
+            if cleanup_error is not None and failure_reason is None:
+                raise cleanup_error
 
 
 def load_config(config):
