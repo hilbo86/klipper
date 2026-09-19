@@ -3,7 +3,7 @@
 This extension reuses the Renkforce probe load cell as a sensor for the complete
 extrusion system. It time-aligns every ADC sample with the extruder TrapQ at the
 sample's original Klipper `print_time`, derives volumetric flow, and compares
-measured force with a material/hotend/nozzle profile.
+measured force with a filament/nozzle profile.
 
 ## Safety model
 
@@ -28,20 +28,34 @@ from recorded data before enabling either module.
 3. Record the `extrusion_force/dump` stream during safe test extrusions. Confirm
    that force follows `flow_mm3_s`, baseline remains stable during extrusion,
    and `EXTRUSION_STEADY` is plausible.
-4. Create one `[extrusion_force_profile <name>]` per material/hotend/nozzle
-   combination. Equivalent tools can share it with a comma-separated
-   `extruder` list; use a single-extruder profile only for a measured hardware
-   difference. Run `FORCE_FLOW_CALIBRATE` with conservative `ABORT_FORCE`,
-   flows, and temperatures. Specify `EXTRUDER` when calibrating a shared
-   profile.
+4. Put printer-independent material data in `[filament_profile <name>]`
+   sections, typically in an included `filaments.cfg`. Create one
+   `[extrusion_force_profile <name>]` per filament/nozzle combination
+   and reference the filament with `valid_for`. Equivalent tools can share it
+   with a comma-separated `extruder` list; use a single-extruder profile only
+   for a measured hardware difference. The force profile's `nozzle_diameter`
+   must match the relevant extruder section. Run
+   `FORCE_FLOW_CALIBRATE` with conservative `ABORT_FORCE`, flows, and
+   temperatures. Specify `EXTRUDER` when calibrating a shared profile.
 5. Review the generated points and recommended limits, then run `SAVE_CONFIG`.
-   Select profiles from filament start G-code with
-   `SET_EXTRUSION_FORCE_PROFILE`. Without `EXTRUDER`, selecting a shared
-   profile assigns it to every extruder listed in that profile.
+   Select the portable filament identity from filament start G-code with, for
+   example, `SET_FILAMENT_PROFILE PROFILE=F01_ASA_Apollox`. The matching
+   printer-specific force profile is selected for the active extruder. Direct
+   selection with `SET_EXTRUSION_FORCE_PROFILE` remains available for
+   calibration and diagnostics.
 
 Calibration data uses piecewise-linear flow interpolation followed by linear
 temperature interpolation. Values outside the calibrated domain return no
 expected force; automatic control does not silently extrapolate them.
+In normal length-based G-code, the slicer has already converted the intended
+extrusion volume into E-axis filament length; the diameter itself is not
+available to the firmware. An optional `filament_diameter` in the filament
+profile must therefore match the slicer setting. The extrusion-force monitor
+and its calibration commands use it to reconstruct volumetric flow. If it is
+omitted, they use `[extruder]`'s nominal diameter. Klipper's core kinematics
+and extrusion limits remain unchanged. Do not enable the slicer's volumetric-E
+or `M200` mode for Klipper. `temperature_tolerance` belongs to the force profile
+because it controls use of the calibrated temperature domain.
 
 ## Fault detection
 

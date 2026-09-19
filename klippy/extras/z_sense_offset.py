@@ -196,8 +196,8 @@ class SensingZOffset:
             "steps=%.2f z_offset=%.6f",
             self.mode, smoothed_force, threshold, steps, self.z_offset)
 
-    def _calibration_line(self, extruder, line_length, line_speed, flow,
-                          y_step, abort_force):
+    def _calibration_line(self, extruder, profile, line_length, line_speed,
+                          flow, y_step, abort_force):
         duration = line_length / line_speed
         position = self.tool.get_position()
         tool_status = self.tool.get_status(
@@ -226,7 +226,8 @@ class SensingZOffset:
         if not y_min <= position[1] <= y_max:
             raise self.printer.command_error(
                 "Not enough Y travel for Z force calibration lines")
-        position[3] += flow * duration / extruder.filament_area
+        filament_area = profile.get_filament_area(extruder.filament_area)
+        position[3] += flow * duration / filament_area
         start_time = self.tool.get_last_move_time()
         self.calibration_samples = []
         self.calibration_error = None
@@ -288,7 +289,7 @@ class SensingZOffset:
             points = []
             for index in range(steps):
                 excess = self._calibration_line(
-                    extruder, line_length, line_speed, flow,
+                    extruder, profile, line_length, line_speed, flow,
                     0.0 if index == 0 else line_spacing,
                     abort_force)
                 compression = index * z_step

@@ -11,7 +11,7 @@ import collections
 import logging
 
 
-class LoadCellFilament:
+class ExtrusionForceFilamentChanger:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
@@ -575,8 +575,13 @@ class LoadCellFilament:
         previous_target = self._target_temperature(extr)
 
         try:
-            # Klipper already calculates filament_area from filament_diameter.
-            max_e_speed = min(max_flow / extr.filament_area,
+            filament_area = extr.filament_area
+            filament_manager = self.printer.lookup_object(
+                "filament_profile_manager", None)
+            if filament_manager is not None:
+                filament_area = filament_manager.get_filament_area(
+                    name, filament_area)
+            max_e_speed = min(max_flow / filament_area,
                               extr.max_e_velocity)
             if max_e_speed <= 0.0:
                 raise gcmd.error("Calculated load speed is invalid")
@@ -811,4 +816,4 @@ class LoadCellFilament:
 
 
 def load_config(config):
-    return LoadCellFilament(config)
+    return ExtrusionForceFilamentChanger(config)

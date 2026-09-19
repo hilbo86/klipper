@@ -1376,13 +1376,27 @@ optional number of samples is used for averaging (defaults to 10).
 `LCP_INFO`: Print parameters used by the load cell probe algorithms to the
 console. Useful for debugging and testing.
 
+### [filament_profile]
+
+#### SET_FILAMENT_PROFILE
+`SET_FILAMENT_PROFILE PROFILE=<name> [EXTRUDER=<name>]`: Select a
+printer-independent filament profile. Without `EXTRUDER`, it applies to the
+currently active extruder. If exactly one extrusion-force profile references
+that filament through `valid_for` and matches the extruder's configured nozzle
+diameter, that force profile is selected automatically. If none matches, any
+previous force profile for the extruder is disabled. Multiple matches are a
+configuration error. An optional filament-profile diameter overrides the
+nominal extruder diameter only for extrusion-force flow calculations.
+
 ### [extrusion_force_profile]
 
 #### SET_EXTRUSION_FORCE_PROFILE
 `SET_EXTRUSION_FORCE_PROFILE PROFILE=<name> [EXTRUDER=<name>]`: Select the
 force profile used for an extruder. Without `EXTRUDER`, the profile is assigned
 to every extruder in its configured `extruder` list. With `EXTRUDER`, only that
-compatible extruder is changed.
+compatible extruder is changed. The selected profile must match the extruder's
+configured `nozzle_diameter`. This lower-level command also selects the
+referenced filament profile.
 
 ### [extrusion_force_calibration]
 

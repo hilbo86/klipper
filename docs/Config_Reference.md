@@ -2489,25 +2489,52 @@ TrapQ data. See [Extrusion force monitoring](Extrusion_Force.md).
 #   Maximum public callback rate. May not exceed 20Hz.
 ```
 
+### [filament_profile]
+
+Filament profiles contain only properties of the filament and can therefore
+be shared unchanged by different printers. They are commonly kept in a
+separate `filaments.cfg` file and included from the printer configuration.
+
+```
+[filament_profile <name>]
+material:
+#   A descriptive material name. This parameter must be provided.
+#max_material_temperature:
+#   Optional safety ceiling in degrees Celsius. This is not a print
+#   temperature setpoint.
+#filament_diameter:
+#   Optional actual filament diameter in mm. Set this to the same value used
+#   by the slicer. While this profile is active, extrusion-force monitoring
+#   and calibration use it instead of the nominal diameter from [extruder]
+#   when converting E-axis velocity to volumetric flow. If omitted, the
+#   nominal extruder value is used.
+```
+
 ### [extrusion_force_profile]
 
-One section is configured for each material/hotend/nozzle combination. A
-profile may be shared by multiple equivalent extruders.
+One section is configured for each filament/nozzle combination. A profile may
+be shared by multiple equivalent extruders. `nozzle_diameter` describes the
+hardware used for calibration and is checked against each relevant extruder
+section before a profile can be selected. A profile for a currently different
+nozzle remains configured but inactive.
 
 ```
 [extrusion_force_profile <name>]
+valid_for:
+#   Name of the filament_profile for which this calibration is valid. This
+#   parameter must be provided.
 extruder: extruder
 #   A comma-separated list of compatible extruders. The first name remains
 #   the compatibility default for status consumers. Commands that perform a
 #   physical calibration require EXTRUDER when more than one is listed.
 #   The default is extruder.
 nozzle_diameter:
-#   This parameter must be provided.
-#filament_diameter: 1.75
-#hotend:
-#material:
-#max_material_temperature:
+#   This value must be provided and must equal the value in a selected
+#   extruder section.
 #temperature_tolerance: 2.0
+#   Maximum distance in degrees Celsius outside the calibrated temperature
+#   range at which an endpoint may still be used. As it qualifies the
+#   calibration data, it belongs to this combined profile.
 #flow_safety_factor: 0.85
 #response_tau_rise: 0.25
 #response_tau_fall: 0.5
@@ -2518,6 +2545,10 @@ nozzle_diameter:
 #   These values are JSON data written by FORCE_FLOW_CALIBRATE. They
 #   should normally not be edited manually.
 ```
+
+The `[extruder]` value remains authoritative for Klipper's core kinematics and
+extrusion safety limits. The optional filament-profile override affects only
+the extrusion-force subsystem; it does not modify a core printer object.
 
 ### [extrusion_force_calibration]
 
@@ -2630,8 +2661,9 @@ positive-extrusion moves and chains with `z_sense_offset`.
 #collision_cooldown: 0.5
 ```
 
-The existing `[z_sense_offset]`, `[pressure_priming]`, and
-`[load_cell_filament]` sections automatically use the monitor's operation lock
+The existing `[z_sense_offset]`, `[extrusion_force_priming]`, and
+`[extrusion_force_filament_changer]` sections automatically use the monitor's
+operation lock
 when it is configured. `z_sense_offset` additionally accepts
 `monitor`, `minimum_force_margin`, `noise_factor`, `relative_margin`,
 `minimum_confidence`, `z_force_slope_g_per_mm`, and `max_geometric_error`.

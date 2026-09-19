@@ -181,6 +181,7 @@ class ExtrusionForceProcessor:
         e_velocity = float(observation.get("e_velocity", 0.0))
         xy_velocity = float(observation.get("xy_velocity", 0.0))
         flow = max(0.0, float(observation.get("flow_mm3_s", 0.0)))
+        filament_diameter = observation.get("filament_diameter")
         extruder = observation.get("extruder")
         if extruder != self.last_extruder:
             self.last_extruder = extruder
@@ -255,6 +256,7 @@ class ExtrusionForceProcessor:
             "e_velocity": e_velocity,
             "xy_velocity": xy_velocity,
             "flow_mm3_s": flow,
+            "filament_diameter": filament_diameter,
             "temperature": temperature,
             "target_temperature": target_temperature,
             "expected_force_g": expected,
@@ -367,6 +369,7 @@ class ExtrusionForceMonitor:
         self.toolhead_provider = None
         self.last_extruder = None
         self.profile_manager = None
+        self.filament_manager = None
         self.operation_owner = None
         self.load_cell = None
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
@@ -392,6 +395,8 @@ class ExtrusionForceMonitor:
                 name, extruder.get_trapq(), extruder=True)
         self.profile_manager = self.printer.lookup_object(
             "extrusion_force_profile_manager", None)
+        self.filament_manager = self.printer.lookup_object(
+            "filament_profile_manager", None)
 
     def _handle_dump_request(self, web_request):
         from .bulk_sensor import BatchWebhooksClient
@@ -436,16 +441,22 @@ class ExtrusionForceMonitor:
         eventtime = self.reactor.monotonic()
         temperature = target = 0.0
         filament_area = 0.0
+        filament_diameter = None
         if extruder is not None:
             status = extruder.get_status(eventtime)
             temperature = status["temperature"]
             target = status["target"]
             filament_area = extruder.filament_area
+            if self.filament_manager is not None:
+                filament_area = self.filament_manager.get_filament_area(
+                    extruder_name, filament_area)
+            filament_diameter = 2.0 * math.sqrt(filament_area / math.pi)
         flow = max(0.0, motion["e_velocity"] * filament_area)
         observation = dict(sample)
         observation.update(motion)
         observation.update({
             "flow_mm3_s": flow,
+            "filament_diameter": filament_diameter,
             "temperature": temperature,
             "target_temperature": target,
         })
@@ -520,6 +531,7 @@ class ExtrusionForceMonitor:
                 "expected_force_g": None,
                 "excess_force_g": None,
                 "flow_mm3_s": 0.0,
+                "filament_diameter": None,
                 "e_velocity": 0.0,
                 "temperature": 0.0,
                 "noise_g": 0.0,
@@ -536,6 +548,7 @@ class ExtrusionForceMonitor:
             "expected_force_g": state["expected_dynamic_force_g"],
             "excess_force_g": state["excess_force_g"],
             "flow_mm3_s": state["flow_mm3_s"],
+            "filament_diameter": state["filament_diameter"],
             "e_velocity": state["e_velocity"],
             "temperature": state["temperature"],
             "noise_g": state["noise_g"],

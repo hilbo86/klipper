@@ -355,17 +355,26 @@ The following information is available when `[extrusion_force_monitor]` is
 configured:
 - `enabled`, `extruder`, `profile`, and motion `state`.
 - `force_g`, `expected_force_g`, and `excess_force_g` in grams.
-- `flow_mm3_s`, `e_velocity`, and `temperature`.
+- `flow_mm3_s`, the diameter used as `filament_diameter`, `e_velocity`, and
+  `temperature`.
 - `noise_g`, `confidence`, and the current shared `operation` owner.
 
 The `extrusion_force/dump` mux endpoint provides timestamped force, expected
 force, excess force, flow, temperature, state, and confidence records without
 per-sample log output.
 
+## filament_profile
+
+Each profile reports its `name`, descriptive `material`, optional
+`max_material_temperature`, and optional actual `filament_diameter`.
+`filament_profile_manager` reports the active filament profile by extruder.
+
 ## extrusion_force_profile
 
-Each profile reports its material/extruder/hotend/nozzle identity, calibration
-point count, material temperature ceiling, and rise/fall response constants.
+Each profile reports its `valid_for` filament reference,
+material/extruder/nozzle identity, filament diameter, compatible and
+incompatible extruders (including mismatch reasons), calibration point count,
+material temperature ceiling, and rise/fall response constants.
 
 ## extrusion_force_guard
 

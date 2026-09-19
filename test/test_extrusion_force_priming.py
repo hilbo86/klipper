@@ -1,6 +1,6 @@
 import unittest
 
-from klippy.extras.pressure_priming import PressurePriming
+from klippy.extras.extrusion_force_priming import ExtrusionForcePriming
 
 
 class CommandError(Exception):
@@ -131,7 +131,7 @@ class FakeGCode:
 
 
 def make_priming(times=None):
-    priming = object.__new__(PressurePriming)
+    priming = object.__new__(ExtrusionForcePriming)
     priming.reactor = FakeReactor(times)
     priming.force_threshold_default = 600.0
     priming.force_safety_limit = 3000.0
@@ -156,7 +156,7 @@ def make_priming(times=None):
     return priming
 
 
-class PressurePrimingTest(unittest.TestCase):
+class ExtrusionForcePrimingTest(unittest.TestCase):
     def assert_cleanup(self, priming):
         self.assertEqual(len(priming.load_cell.added), 1)
         self.assertEqual(len(priming.load_cell.removed), 1)

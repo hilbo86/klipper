@@ -15,6 +15,8 @@ from klippy.extras.extrusion_force_monitor import (
     MotionClassifier, TrapQMotionProvider, replay_rows)
 from klippy.extras.extrusion_force_profile import (
     ForceProfile, ForceProfileManager, detect_knee)
+from klippy.extras.filament_profile import (
+    FilamentProfile, FilamentProfileManager)
 
 
 class FakeProfile:
@@ -149,6 +151,7 @@ class ProfileExtruderAssignmentTest(unittest.TestCase):
     class Printer:
         def __init__(self):
             self.events = []
+            self.objects = {}
 
         def config_error(self, message):
             return ValueError(message)
@@ -156,11 +159,18 @@ class ProfileExtruderAssignmentTest(unittest.TestCase):
         def send_event(self, event, *args):
             self.events.append((event,) + args)
 
+        def lookup_object(self, name, default=None):
+            return self.objects.get(name, default)
+
     def make_profile(self, name, extruders):
         profile = object.__new__(ForceProfile)
         profile.name = name
         profile.extruders = tuple(extruders)
         profile.extruder = profile.extruders[0]
+        profile.valid_for = "filament"
+        profile.filament_profile = None
+        profile.compatibility_errors = {
+            extruder: [] for extruder in profile.extruders}
         return profile
 
     def make_manager(self):
@@ -168,6 +178,7 @@ class ProfileExtruderAssignmentTest(unittest.TestCase):
         manager.printer = self.Printer()
         manager.profiles = {}
         manager.active = {}
+        manager.filament_manager = None
         return manager
 
     def test_resolve_requires_extruder_for_shared_profile(self):
@@ -184,13 +195,13 @@ class ProfileExtruderAssignmentTest(unittest.TestCase):
         profile = self.make_profile("single", ("extruder",))
         self.assertEqual(profile.resolve_extruder(self.Gcmd()), "extruder")
 
-    def test_shared_profile_is_initial_default_for_each_extruder(self):
+    def test_profiles_are_inactive_until_filament_is_selected(self):
         manager = self.make_manager()
         profile = self.make_profile(
             "shared", ("extruder", "extruder1"))
         manager.add_profile(profile)
-        self.assertIs(manager.get_active("extruder"), profile)
-        self.assertIs(manager.get_active("extruder1"), profile)
+        self.assertIsNone(manager.get_active("extruder"))
+        self.assertIsNone(manager.get_active("extruder1"))
 
     def test_set_without_extruder_assigns_all_supported_extruders(self):
         manager = self.make_manager()
@@ -214,6 +225,8 @@ class ProfileExtruderAssignmentTest(unittest.TestCase):
             "selected", ("extruder", "extruder1"))
         manager.add_profile(initial)
         manager.add_profile(selected)
+        manager.active["extruder"] = initial
+        manager.active["extruder1"] = initial
         manager.cmd_SET_PROFILE(self.Gcmd(
             PROFILE="selected", EXTRUDER="extruder1"))
         self.assertIs(manager.get_active("extruder"), initial)
@@ -226,6 +239,163 @@ class ProfileExtruderAssignmentTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not apply"):
             manager.cmd_SET_PROFILE(self.Gcmd(
                 PROFILE="shared", EXTRUDER="extruder2"))
+
+    def test_set_rejects_hardware_mismatch(self):
+        manager = self.make_manager()
+        profile = self.make_profile("wrong_nozzle", ("extruder",))
+        profile.compatibility_errors["extruder"] = [
+            "nozzle_diameter 0.6 does not match 0.4"]
+        manager.add_profile(profile)
+        with self.assertRaisesRegex(ValueError, "incompatible"):
+            manager.cmd_SET_PROFILE(self.Gcmd(PROFILE="wrong_nozzle"))
+
+    def test_check_extruder_compares_nozzle(self):
+        profile = self.make_profile("hardware", ("extruder",))
+        profile.nozzle_diameter = 0.6
+        extruder = type("Extruder", (), {
+            "nozzle_diameter": 0.4,
+        })()
+        errors = profile.check_extruder("extruder", extruder)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("nozzle_diameter", profile.compatibility_error(
+            "extruder"))
+
+
+class FilamentProfileSelectionTest(unittest.TestCase):
+    class Gcmd(ProfileExtruderAssignmentTest.Gcmd):
+        pass
+
+    class Printer(ProfileExtruderAssignmentTest.Printer):
+        pass
+
+    def make_managers(self):
+        printer = self.Printer()
+        extruder = type("Extruder", (), {
+            "filament_area": 1.0,
+            "get_heater": lambda self: None,
+        })()
+        printer.objects["extruder"] = extruder
+
+        force_manager = object.__new__(ForceProfileManager)
+        force_manager.printer = printer
+        force_manager.profiles = {}
+        force_manager.active = {}
+        force_manager.filament_manager = None
+        printer.objects["extrusion_force_profile_manager"] = force_manager
+
+        filament_manager = object.__new__(FilamentProfileManager)
+        filament_manager.printer = printer
+        filament_manager.profiles = {}
+        filament_manager.active = {}
+        printer.objects["filament_profile_manager"] = filament_manager
+        force_manager.filament_manager = filament_manager
+        return printer, filament_manager, force_manager
+
+    def make_filament(self, name):
+        filament = object.__new__(FilamentProfile)
+        filament.name = name
+        filament.material = "ASA"
+        filament.max_material_temperature = 255.0
+        filament.filament_diameter = 1.70
+        filament.filament_area = math.pi * (1.70 * 0.5) ** 2
+        return filament
+
+    def make_force_profile(self, name, valid_for, compatible=True):
+        profile = object.__new__(ForceProfile)
+        profile.name = name
+        profile.extruders = ("extruder",)
+        profile.extruder = "extruder"
+        profile.valid_for = valid_for
+        profile.filament_profile = None
+        profile.compatibility_errors = {
+            "extruder": [] if compatible else ["hardware mismatch"]}
+        return profile
+
+    def test_portable_selection_activates_matching_force_profile(self):
+        _, filament_manager, force_manager = self.make_managers()
+        filament = self.make_filament("F01_ASA_Apollox")
+        profile = self.make_force_profile(
+            "rf2000_asa", "F01_ASA_Apollox")
+        profile.bind_filament_profile(filament)
+        filament_manager.add_profile(filament)
+        force_manager.add_profile(profile)
+
+        filament_manager.cmd_SET_FILAMENT_PROFILE(self.Gcmd(
+            PROFILE="F01_ASA_Apollox", EXTRUDER="extruder"))
+
+        self.assertIs(filament_manager.get_active("extruder"), filament)
+        self.assertIs(force_manager.get_active("extruder"), profile)
+
+    def test_selection_disables_stale_force_profile_without_match(self):
+        _, filament_manager, force_manager = self.make_managers()
+        filament = self.make_filament("F01_ASA_Apollox")
+        stale = self.make_force_profile("stale", "different")
+        filament_manager.add_profile(filament)
+        force_manager.active["extruder"] = stale
+
+        filament_manager.cmd_SET_FILAMENT_PROFILE(self.Gcmd(
+            PROFILE="F01_ASA_Apollox", EXTRUDER="extruder"))
+
+        self.assertIs(filament_manager.get_active("extruder"), filament)
+        self.assertIsNone(force_manager.get_active("extruder"))
+
+    def test_active_filament_overrides_nominal_area(self):
+        _, filament_manager, _ = self.make_managers()
+        filament = self.make_filament("measured")
+        filament_manager.add_profile(filament)
+        filament_manager.activate("extruder", filament)
+        self.assertAlmostEqual(
+            filament_manager.get_filament_area("extruder", 123.0),
+            math.pi * (1.70 * 0.5) ** 2)
+        self.assertEqual(
+            filament_manager.get_filament_area("extruder1", 123.0),
+            123.0)
+
+    def test_monitor_uses_active_filament_diameter_for_flow(self):
+        _, filament_manager, _ = self.make_managers()
+        filament = self.make_filament("measured")
+        filament_manager.add_profile(filament)
+        filament_manager.activate("extruder", filament)
+        nominal_area = math.pi * (1.75 * 0.5) ** 2
+        extruder = type("Extruder", (), {
+            "filament_area": nominal_area,
+            "get_status": lambda self, eventtime: {
+                "temperature": 220.0, "target": 220.0},
+        })()
+        monitor = object.__new__(ExtrusionForceMonitor)
+        monitor.extruders = {"extruder": extruder}
+        monitor.reactor = type("Reactor", (), {
+            "monotonic": lambda self: 0.0})()
+        monitor._motion_at = lambda print_time: {
+            "extruder": "extruder", "e_velocity": 2.0,
+            "e_position": 1.0, "xy_velocity": 10.0}
+        monitor.filament_manager = filament_manager
+        monitor.profile_manager = None
+        monitor.processor = type("Processor", (), {
+            "process": lambda self, observation, profile: observation})()
+        monitor.last_callback_time = 1.0
+        monitor.callback_interval = 0.1
+
+        monitor._handle_sample({"print_time": 1.0})
+
+        expected_area = math.pi * (1.70 * 0.5) ** 2
+        self.assertAlmostEqual(
+            monitor.latest["flow_mm3_s"], 2.0 * expected_area)
+        self.assertAlmostEqual(
+            monitor.latest["filament_diameter"], 1.70)
+
+    def test_selection_rejects_ambiguous_force_profiles(self):
+        _, filament_manager, force_manager = self.make_managers()
+        filament = self.make_filament("F01_ASA_Apollox")
+        filament_manager.add_profile(filament)
+        force_manager.add_profile(self.make_force_profile(
+            "first", filament.name))
+        force_manager.add_profile(self.make_force_profile(
+            "second", filament.name))
+
+        with self.assertRaisesRegex(ValueError, "Multiple compatible"):
+            filament_manager.cmd_SET_FILAMENT_PROFILE(self.Gcmd(
+                PROFILE=filament.name, EXTRUDER="extruder"))
 
 
 class ResponseTest(unittest.TestCase):

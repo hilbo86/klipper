@@ -139,8 +139,9 @@ class ExtruderForceCurrentCalibration:
         if start <= state["print_time"] <= end:
             self.samples.append(state)
 
-    def _extrude(self, toolhead, extruder, flow, duration):
-        velocity = flow / extruder.filament_area
+    def _extrude(self, toolhead, extruder, profile, flow, duration):
+        filament_area = profile.get_filament_area(extruder.filament_area)
+        velocity = flow / filament_area
         start = toolhead.get_last_move_time()
         position = toolhead.get_position()
         position[3] += velocity * duration
@@ -241,7 +242,7 @@ class ExtruderForceCurrentCalibration:
                     for flow in flows:
                         self.safety_error = None
                         measured_peak, measured_stable = self._extrude(
-                            toolhead, extruder, flow,
+                            toolhead, extruder, profile, flow,
                             self.settle_time + self.measure_time)
                         peak = max(peak, measured_peak)
                         stable = max(stable, measured_stable)

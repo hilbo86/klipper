@@ -82,13 +82,17 @@ class ForceProfile:
         # Keep the singular attribute for compatibility with existing status
         # consumers. Commands that operate hardware use resolve_extruder().
         self.extruder = self.extruders[0]
+        self.valid_for = config.get("valid_for")
         self.nozzle_diameter = config.getfloat("nozzle_diameter", above=0.0)
-        self.filament_diameter = config.getfloat(
-            "filament_diameter", 1.75, above=0.0)
-        self.hotend = config.get("hotend", "")
-        self.material = config.get("material", "")
-        self.max_material_temperature = config.getfloat(
-            "max_material_temperature", None, above=0.0)
+        for moved_option in ("material", "max_material_temperature"):
+            if config.get(moved_option, None) is not None:
+                destination = "[%s]" % (
+                    "filament_profile %s" % (self.valid_for,))
+                raise config.error(
+                    "%s in [%s] belongs in %s"
+                    % (moved_option, self.section_name, destination))
+        self.filament_profile = None
+        self.compatibility_errors = {}
         self.response_tau_rise = config.getfloat(
             "response_tau_rise", 0.25, above=0.0)
         self.response_tau_fall = config.getfloat(
@@ -118,6 +122,52 @@ class ForceProfile:
             self.printer.add_object(
                 "extrusion_force_profile_manager", self.manager)
         self.manager.add_profile(self)
+
+    @property
+    def material(self):
+        if self.filament_profile is None:
+            return ""
+        return self.filament_profile.material
+
+    @property
+    def max_material_temperature(self):
+        if self.filament_profile is None:
+            return None
+        return self.filament_profile.max_material_temperature
+
+    @property
+    def filament_diameter(self):
+        if self.filament_profile is None:
+            return None
+        return self.filament_profile.filament_diameter
+
+    def get_filament_area(self, nominal_area):
+        if (self.filament_profile is None
+                or self.filament_profile.filament_area is None):
+            return nominal_area
+        return self.filament_profile.filament_area
+
+    def bind_filament_profile(self, filament_profile):
+        self.filament_profile = filament_profile
+
+    def check_extruder(self, extruder_name, extruder):
+        errors = []
+        if not math.isclose(
+                self.nozzle_diameter, extruder.nozzle_diameter,
+                rel_tol=0.0, abs_tol=1e-6):
+            errors.append(
+                "nozzle_diameter %.6g does not match %.6g"
+                % (self.nozzle_diameter, extruder.nozzle_diameter))
+        self.compatibility_errors[extruder_name] = errors
+        return errors
+
+    def compatibility_error(self, extruder):
+        errors = self.compatibility_errors.get(extruder)
+        if errors is None:
+            return "extruder compatibility has not been checked"
+        if errors:
+            return "; ".join(errors)
+        return None
 
     def _load_points(self, value):
         if not value:
@@ -289,11 +339,16 @@ class ForceProfile:
                     "Profile '%s' applies to multiple extruders (%s); "
                     "specify EXTRUDER"
                     % (self.name, ", ".join(self.extruders)))
-            return self.extruder
+            extruder = self.extruder
         if not self.supports_extruder(extruder):
             raise gcmd.error(
                 "Profile '%s' does not apply to extruder '%s' (allowed: %s)"
                 % (self.name, extruder, ", ".join(self.extruders)))
+        incompatibility = self.compatibility_error(extruder)
+        if incompatibility is not None:
+            raise gcmd.error(
+                "Profile '%s' is incompatible with extruder '%s': %s"
+                % (self.name, extruder, incompatibility))
         return extruder
 
     def get_status(self, eventtime):
@@ -301,11 +356,20 @@ class ForceProfile:
             "name": self.name,
             "extruder": self.extruder,
             "extruders": list(self.extruders),
+            "valid_for": self.valid_for,
             "material": self.material,
-            "hotend": self.hotend,
             "nozzle_diameter": self.nozzle_diameter,
             "filament_diameter": self.filament_diameter,
             "max_material_temperature": self.max_material_temperature,
+            "compatible_extruders": [
+                extruder for extruder in self.extruders
+                if not self.compatibility_errors.get(extruder, [True])
+            ],
+            "incompatible_extruders": {
+                extruder: "; ".join(errors)
+                for extruder, errors in self.compatibility_errors.items()
+                if errors
+            },
             "calibration_points": len(self.points),
             "response_tau_rise": self.response_tau_rise,
             "response_tau_fall": self.response_tau_fall,
@@ -321,6 +385,9 @@ class ForceProfileManager:
         self.printer = config.get_printer()
         self.profiles = {}
         self.active = {}
+        self.filament_manager = None
+        self.printer.register_event_handler(
+            "klippy:connect", self._handle_connect)
         gcode = self.printer.lookup_object("gcode")
         gcode.register_command(
             "SET_EXTRUSION_FORCE_PROFILE", self.cmd_SET_PROFILE,
@@ -332,9 +399,28 @@ class ForceProfileManager:
             raise self.printer.config_error(
                 "Duplicate extrusion force profile '%s'" % (profile.name,))
         self.profiles[key] = profile
-        for extruder in profile.extruders:
-            if extruder not in self.active:
-                self.active[extruder] = profile
+
+    def _handle_connect(self):
+        self.filament_manager = self.printer.lookup_object(
+            "filament_profile_manager", None)
+        if self.filament_manager is None:
+            raise self.printer.config_error(
+                "extrusion_force_profile requires at least one "
+                "filament_profile")
+        for profile in self.profiles.values():
+            filament = self.filament_manager.get_profile(profile.valid_for)
+            if filament is None:
+                raise self.printer.config_error(
+                    "Unknown filament profile '%s' referenced by [%s]"
+                    % (profile.valid_for, profile.section_name))
+            profile.bind_filament_profile(filament)
+            for extruder_name in profile.extruders:
+                extruder = self.printer.lookup_object(extruder_name, None)
+                if extruder is None:
+                    raise self.printer.config_error(
+                        "Unknown extruder '%s' referenced by [%s]"
+                        % (extruder_name, profile.section_name))
+                profile.check_extruder(extruder_name, extruder)
 
     def get_profile(self, name):
         if name is None:
@@ -343,6 +429,31 @@ class ForceProfileManager:
 
     def get_active(self, extruder):
         return self.active.get(extruder)
+
+    def find_for_filament(self, filament, extruder, gcmd):
+        matching = [
+            profile for profile in self.profiles.values()
+            if profile.valid_for.lower() == filament.name.lower()
+            and profile.supports_extruder(extruder)
+            and profile.compatibility_error(extruder) is None
+        ]
+        if len(matching) > 1:
+            raise gcmd.error(
+                "Multiple compatible extrusion force profiles for filament "
+                "'%s' and extruder '%s': %s"
+                % (filament.name, extruder,
+                   ", ".join(profile.name for profile in matching)))
+        return matching[0] if matching else None
+
+    def activate_for_filament(self, extruder, profile):
+        if profile is None:
+            self.active.pop(extruder, None)
+            profile_name = None
+        else:
+            self.active[extruder] = profile
+            profile_name = profile.name
+        self.printer.send_event(
+            "extrusion_force:profile_changed", extruder, profile_name)
 
     def cmd_SET_PROFILE(self, gcmd):
         name = gcmd.get("PROFILE")
@@ -361,9 +472,16 @@ class ForceProfileManager:
                        ", ".join(profile.extruders)))
             extruders = (extruder,)
         for extruder in extruders:
-            self.active[extruder] = profile
-            self.printer.send_event(
-                "extrusion_force:profile_changed", extruder, profile.name)
+            incompatibility = profile.compatibility_error(extruder)
+            if incompatibility is not None:
+                raise gcmd.error(
+                    "Profile '%s' is incompatible with extruder '%s': %s"
+                    % (profile.name, extruder, incompatibility))
+        for extruder in extruders:
+            self.activate_for_filament(extruder, profile)
+            if self.filament_manager is not None:
+                self.filament_manager.activate(
+                    extruder, profile.filament_profile)
         gcmd.respond_info(
             "Extrusion force profile for %s: %s"
             % (", ".join(extruders), profile.name))

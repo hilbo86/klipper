@@ -175,9 +175,10 @@ class ExtrusionForceDiagnostics:
         self.printer.lookup_object("heaters").set_temperature(
             extruder.get_heater(), temperature, wait)
 
-    def _collect_extrusion(self, toolhead, extruder, flow, duration,
-                           discard_time=0.0):
-        velocity = flow / extruder.filament_area
+    def _collect_extrusion(self, toolhead, extruder, profile, flow,
+                           duration, discard_time=0.0):
+        filament_area = profile.get_filament_area(extruder.filament_area)
+        velocity = flow / filament_area
         start = toolhead.get_last_move_time()
         position = toolhead.get_position()
         position[3] += velocity * duration
@@ -207,7 +208,8 @@ class ExtrusionForceDiagnostics:
         expected = profile.expected_force(flow, temperature)
         if expected is None:
             raise gcmd.error("Diagnostic point is outside calibrated profile")
-        velocity = flow / extruder.filament_area
+        filament_area = profile.get_filament_area(extruder.filament_area)
+        velocity = flow / filament_area
         duration = length / velocity
         owner = "EXTRUSION_FORCE_DIAGNOSTIC"
         self.monitor.claim_operation(owner)
@@ -219,7 +221,8 @@ class ExtrusionForceDiagnostics:
             self._set_temperature(extruder, temperature, True)
             self.reactor.pause(self.reactor.monotonic() + 1.0)
             states = self._collect_extrusion(
-                toolhead, extruder, flow, duration, self.settle_time)
+                toolhead, extruder, profile, flow, duration,
+                self.settle_time)
             values = [state["force_control_g"] for state in states
                       if state["motion_state"] == "EXTRUSION_STEADY"]
             if len(values) < 2:
@@ -285,11 +288,11 @@ class ExtrusionForceDiagnostics:
                     "SET_PRESSURE_ADVANCE EXTRUDER=%s ADVANCE=%.6f"
                     % (extruder_name, pa))
                 self._collect_extrusion(
-                    toolhead, extruder, flow_low, duration)
+                    toolhead, extruder, profile, flow_low, duration)
                 rise_states = self._collect_extrusion(
-                    toolhead, extruder, flow_high, duration)
+                    toolhead, extruder, profile, flow_high, duration)
                 fall_states = self._collect_extrusion(
-                    toolhead, extruder, flow_low, duration)
+                    toolhead, extruder, profile, flow_low, duration)
                 rise = [(state["print_time"], state["force_fast_g"])
                         for state in rise_states]
                 fall = [(state["print_time"], state["force_fast_g"])

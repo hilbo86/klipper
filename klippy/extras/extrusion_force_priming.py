@@ -26,7 +26,7 @@ def format_pressure_summary(forces, success, failure_reason=None):
     return "\n".join(lines)
 
 
-class PressurePriming:
+class ExtrusionForcePriming:
     def __init__(self, config):
         self.name = config.get_name()
         self.printer = config.get_printer()
@@ -239,4 +239,4 @@ class PressurePriming:
 
 
 def load_config(config):
-    return PressurePriming(config)
+    return ExtrusionForcePriming(config)

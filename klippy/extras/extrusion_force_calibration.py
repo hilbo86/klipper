@@ -149,9 +149,10 @@ class ExtrusionForceCalibration:
     def _wait_baseline(self):
         self.reactor.pause(self.reactor.monotonic() + self.baseline_time)
 
-    def _extrude(self, toolhead, extruder, flow, duration,
+    def _extrude(self, toolhead, extruder, profile, flow, duration,
                  settle_time=0.0, collect=False):
-        e_velocity = flow / extruder.filament_area
+        filament_area = profile.get_filament_area(extruder.filament_area)
+        e_velocity = flow / filament_area
         start_time = toolhead.get_last_move_time()
         position = toolhead.get_position()
         position[3] += e_velocity * duration
@@ -167,10 +168,10 @@ class ExtrusionForceCalibration:
             raise self.printer.command_error(self.safety_error)
         return list(self.measurements)
 
-    def _measure_flow(self, toolhead, extruder, flow, settle_time,
-                      measure_time):
+    def _measure_flow(self, toolhead, extruder, profile, flow,
+                      settle_time, measure_time):
         samples = self._extrude(
-            toolhead, extruder, flow, settle_time + measure_time,
+            toolhead, extruder, profile, flow, settle_time + measure_time,
             settle_time=settle_time, collect=True)
         steady = [state["force_control_g"] for state in samples
                   if state["motion_state"] == "EXTRUSION_STEADY"]
@@ -258,14 +259,18 @@ class ExtrusionForceCalibration:
                 self._set_temperature(extruder, temperature, wait=True)
                 self._wait_baseline()
                 if self.purge_length > 0.0:
+                    filament_area = profile.get_filament_area(
+                        extruder.filament_area)
                     purge_duration = self.purge_length / (
-                        self.purge_flow / extruder.filament_area)
-                    self._extrude(toolhead, extruder, self.purge_flow,
-                                  purge_duration)
+                        self.purge_flow / filament_area)
+                    self._extrude(
+                        toolhead, extruder, profile, self.purge_flow,
+                        purge_duration)
                     self._wait_baseline()
                 for flow in flows:
                     result = self._measure_flow(
-                        toolhead, extruder, flow, settle_time, measure_time)
+                        toolhead, extruder, profile, flow, settle_time,
+                        measure_time)
                     point = {
                         "temperature": temperature,
                         "flow": flow,
@@ -293,9 +298,9 @@ class ExtrusionForceCalibration:
             monitor.release_operation(owner)
             self._set_temperature(extruder, original_target, wait=False)
 
-    def _response_segment(self, toolhead, extruder, flow, duration):
+    def _response_segment(self, toolhead, extruder, profile, flow, duration):
         samples = self._extrude(
-            toolhead, extruder, flow, duration, collect=True)
+            toolhead, extruder, profile, flow, duration, collect=True)
         return [(state["print_time"], state["force_fast_g"])
                 for state in samples]
 
@@ -328,11 +333,11 @@ class ExtrusionForceCalibration:
             self._set_temperature(extruder, temperature, wait=True)
             self._wait_baseline()
             low_before = self._response_segment(
-                toolhead, extruder, flow_low, duration)
+                toolhead, extruder, profile, flow_low, duration)
             rise = self._response_segment(
-                toolhead, extruder, flow_high, duration)
+                toolhead, extruder, profile, flow_high, duration)
             fall = self._response_segment(
-                toolhead, extruder, flow_low, duration)
+                toolhead, extruder, profile, flow_low, duration)
             if not low_before or not rise or not fall:
                 raise gcmd.error(
                     "Insufficient samples for response calibration")
