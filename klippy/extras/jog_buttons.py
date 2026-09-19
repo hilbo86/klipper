@@ -1,0 +1,743 @@
+# Guarded continuous and step jogging from physical buttons
+#
+# Copyright (C) 2026  Timo H.
+#
+# This file may be distributed under the terms of the GNU GPLv3 license.
+import logging
+import mcu
+
+
+HOMING_START_DELAY = 0.001
+MODE_GUARD_INTERVAL = 0.100
+DISPLAY_BLINK_INTERVAL = 2.0
+VIRTUAL_CLICK_DELAY = 0.001
+
+
+class JogInput:
+    def __init__(self, name, axis, direction, speed):
+        self.name = name
+        self.axis = axis
+        self.direction = direction
+        self.speed = speed
+        self.pressed = False
+        self.forwarded = False
+
+
+class VirtualButtonRegistration:
+    def __init__(self, names, callback):
+        self.names = names
+        self.callback = callback
+        self.state = 0
+
+    def update(self, eventtime, name, state):
+        bit = 1 << self.names.index(name)
+        new_state = self.state | bit if state else self.state & ~bit
+        if new_state == self.state:
+            return
+        self.state = new_state
+        self.callback(eventtime, self.state)
+
+
+class JogButtons:
+    def __init__(self, config):
+        self.printer = config.get_printer()
+        self.reactor = self.printer.get_reactor()
+        self.gcode = self.printer.lookup_object('gcode')
+        self.gcode_mutex = self.gcode.get_mutex()
+        self.toolhead = self.kin = self.dispatch = None
+        self.kin_steppers = self.trigger_steppers = []
+        self.is_ready = self.enabled = self.dispatch_active = False
+        self.active_input = None
+        self.motion_mode = 'continuous'
+        self.display_blink_epoch = 0.
+        self.last_display_position = None
+        self.position_error_logged = False
+        self.last_reject = ""
+        self.enable_hold_time = config.getfloat(
+            'enable_hold_time', 2., minval=2.)
+        self.step_distance = config.getfloat(
+            'step_distance', 1., above=0.)
+        self.extrude_step_distance = config.getfloat(
+            'extrude_step_distance', self.step_distance, above=0.)
+        self.extrude_distance = config.getfloat(
+            'extrude_distance', 25., above=0.)
+        self.mode_beeper_name = config.get('mode_beeper', None)
+        self.mode_beep_frequency = config.getfloat(
+            'mode_beep_frequency', 2000., above=0.)
+        self.mode_beep_duration = config.getfloat(
+            'mode_beep_duration', .035, above=0.)
+        self.mode_beep_gap = config.getfloat(
+            'mode_beep_gap', .040, minval=0.)
+        self.mode_beep_value = config.getfloat(
+            'mode_beep_value', .5, minval=0., maxval=1.)
+        self.mode_beeper = None
+        self.mode_beeper_type = None
+        xy_speed = config.getfloat('xy_speed', 40., above=0.)
+        z_speed = config.getfloat('z_speed', 5., above=0.)
+        extrude_speed = config.getfloat('extrude_speed', 5., above=0.)
+        input_defs = [
+            ('x_minus', 0, -1, xy_speed),
+            ('x_plus', 0, 1, xy_speed),
+            ('y_minus', 1, -1, xy_speed),
+            ('y_plus', 1, 1, xy_speed),
+            ('z_minus', 2, -1, z_speed),
+            ('z_plus', 2, 1, z_speed),
+            ('extrude_minus', 3, -1, extrude_speed),
+            ('extrude_plus', 3, 1, extrude_speed),
+        ]
+        self.inputs = []
+        self.inputs_by_name = {}
+        for name, axis, direction, speed in input_defs:
+            pin = config.get(name + '_pin', None)
+            if pin is None:
+                continue
+            jog_input = JogInput(name, axis, direction, speed)
+            self.inputs.append(jog_input)
+            self.inputs_by_name[name] = jog_input
+        if not self.inputs:
+            raise config.error("[jog_buttons] must define a motion pin")
+        self.ok_input = None
+        ok_pin = config.get('ok_pin', None)
+        if ok_pin is not None:
+            self.ok_input = JogInput('ok', None, 0, 0.)
+            self.inputs_by_name['ok'] = self.ok_input
+        emergency_pin = config.get('emergency_stop_pin', None)
+        self.virtual_callbacks = {
+            name: [] for name in self.inputs_by_name
+        }
+        if emergency_pin is not None:
+            self.virtual_callbacks['emergency_stop'] = []
+        ppins = self.printer.lookup_object('pins')
+        self.pin_error = ppins.error
+        ppins.register_chip('jog_buttons', self)
+        buttons = self.printer.load_object(config, 'buttons')
+        for jog_input in self.inputs:
+            pin = config.get(jog_input.name + '_pin')
+            callback = lambda e, s, ji=jog_input: (
+                self._motion_button_event(e, ji, s))
+            buttons.register_debounce_button(pin, callback, config)
+        if self.ok_input is not None:
+            buttons.register_debounce_button(
+                ok_pin, self._ok_button_event, config)
+        if emergency_pin is not None:
+            buttons.register_debounce_button(
+                emergency_pin, self._emergency_stop_event, config)
+        self.ok_hold_target = None
+        self.ok_hold_handled = False
+        self.ok_hold_timer = self.reactor.register_timer(
+            self._ok_hold_event)
+        self.mode_guard_timer = self.reactor.register_timer(
+            self._mode_guard_event)
+        self.gcode.register_command(
+            'SET_JOG_MODE', self.cmd_SET_JOG_MODE,
+            desc=self.cmd_SET_JOG_MODE_help)
+        webhooks = self.printer.lookup_object('webhooks')
+        webhooks.register_endpoint(
+            'jog_buttons/set_mode', self._handle_set_mode_request)
+        self.printer.register_event_handler(
+            'klippy:mcu_identify', self._handle_mcu_identify)
+        self.printer.register_event_handler(
+            'klippy:ready', self._handle_ready)
+        self.printer.register_event_handler(
+            'klippy:shutdown', self._handle_shutdown)
+        self.printer.register_event_handler(
+            'toolhead:sync_print_time', self._handle_motion_start)
+        self.printer.register_event_handler(
+            'stepper_enable:motor_off', self._handle_motor_off)
+
+    # Logical button chip interface used by extras/buttons.py.
+    def register_button_callback(self, pin_params_list, callback):
+        names = []
+        for pin_params in pin_params_list:
+            name = pin_params['pin']
+            if name not in self.virtual_callbacks:
+                raise self.pin_error(
+                    "Unknown jog_buttons virtual pin '%s'" % (name,))
+            if pin_params['invert'] or pin_params['pullup']:
+                raise self.pin_error(
+                    "jog_buttons virtual pins cannot be inverted or pulled up")
+            names.append(name)
+        registration = VirtualButtonRegistration(names, callback)
+        for name in names:
+            self.virtual_callbacks[name].append(registration)
+
+    def _emit_virtual(self, eventtime, name, state):
+        for registration in self.virtual_callbacks[name]:
+            registration.update(eventtime, name, bool(state))
+
+    def _handle_mcu_identify(self):
+        # TriggerDispatch must allocate its MCU objects before MCU config.
+        self.toolhead = self.printer.lookup_object('toolhead')
+        self.kin = self.toolhead.get_kinematics()
+        self.kin_steppers = self.kin.get_steppers()
+        if not self.kin_steppers:
+            raise self.printer.config_error(
+                "[jog_buttons] requires kinematic steppers")
+        trigger_steppers = list(self.kin_steppers)
+        extruders = [
+            (name, obj) for name, obj in self.printer.lookup_objects()
+            if (name == 'extruder'
+                or (name.startswith('extruder') and name[8:].isdigit()))
+        ]
+        for name, extruder in extruders:
+            extruder_stepper = getattr(extruder, 'extruder_stepper', None)
+            if extruder_stepper is not None:
+                trigger_steppers.append(extruder_stepper.stepper)
+        for name, wrapper in self.printer.lookup_objects('extruder_stepper'):
+            trigger_steppers.append(wrapper.extruder_stepper.stepper)
+        self.trigger_steppers = []
+        for stepper in trigger_steppers:
+            if stepper not in self.trigger_steppers:
+                self.trigger_steppers.append(stepper)
+        self.dispatch = mcu.TriggerDispatch(
+            self.trigger_steppers[0].get_mcu())
+        for stepper in self.trigger_steppers:
+            self.dispatch.add_stepper(stepper)
+
+    def _handle_ready(self):
+        self.idle_timeout = self.printer.lookup_object('idle_timeout')
+        self.pause_resume = self.printer.lookup_object('pause_resume', None)
+        self.print_stats = self.printer.lookup_object('print_stats', None)
+        self.virtual_sd = self.printer.lookup_object('virtual_sdcard', None)
+        if self.mode_beeper_name is not None:
+            pwm_name = 'pwm_cycle_time ' + self.mode_beeper_name
+            output_name = 'output_pin ' + self.mode_beeper_name
+            pwm_beeper = self.printer.lookup_object(pwm_name, None)
+            output_beeper = self.printer.lookup_object(output_name, None)
+            if pwm_beeper is not None and output_beeper is not None:
+                raise self.printer.config_error(
+                    "[jog_buttons] mode_beeper '%s' is ambiguous; use"
+                    " distinct [pwm_cycle_time] and [output_pin] names"
+                    % (self.mode_beeper_name,))
+            if pwm_beeper is not None:
+                if (not hasattr(pwm_beeper, 'mcu_pin')
+                    or not hasattr(pwm_beeper.mcu_pin,
+                                   'set_pwm_cycle')):
+                    raise self.printer.config_error(
+                        "Invalid [pwm_cycle_time %s] for [jog_buttons]"
+                        % (self.mode_beeper_name,))
+                self.mode_beeper = pwm_beeper
+                self.mode_beeper_type = 'pwm'
+            elif output_beeper is not None:
+                if (getattr(output_beeper, 'is_pwm', True)
+                    or not hasattr(output_beeper, 'mcu_pin')
+                    or not hasattr(output_beeper.mcu_pin, 'set_digital')
+                    or not hasattr(output_beeper, 'gcrq')):
+                    raise self.printer.config_error(
+                        "[jog_buttons] mode_beeper '%s' must name a"
+                        " non-PWM [output_pin]"
+                        % (self.mode_beeper_name,))
+                self.mode_beeper = output_beeper
+                self.mode_beeper_type = 'digital'
+            else:
+                raise self.printer.config_error(
+                    "[jog_buttons] mode_beeper '%s' must name a"
+                    " [pwm_cycle_time] or non-PWM [output_pin] section"
+                    % (self.mode_beeper_name,))
+        self.last_display_position = self.toolhead.get_position()
+        self.is_ready = True
+
+    def _handle_shutdown(self):
+        self.is_ready = self.enabled = self.dispatch_active = False
+        self.active_input = None
+
+    def _handle_motion_start(self, curtime, print_time, est_print_time):
+        if self.enabled and self.active_input is None:
+            self._set_enabled(False, "another toolhead operation started")
+
+    def _handle_motor_off(self):
+        if self.enabled:
+            self._set_enabled(False, "the steppers were disabled")
+
+    def _emergency_stop_event(self, eventtime, state):
+        if state and not self.printer.is_shutdown():
+            self.printer.invoke_shutdown(
+                "Shutdown due to jog emergency-stop button")
+        self._emit_virtual(eventtime, 'emergency_stop', state)
+
+    def _get_display_position(self, eventtime):
+        if self.toolhead is None:
+            # Webhooks may query status before klippy:mcu_identify has run.
+            display_pos = (self.last_display_position
+                           if self.last_display_position is not None
+                           else [0., 0., 0., 0.])
+            return self.gcode.Coord(display_pos)
+        commanded_pos = self.toolhead.get_position()
+        if self.active_input is None:
+            self.last_display_position = list(commanded_pos)
+            self.position_error_logged = False
+            return self.toolhead.Coord(commanded_pos)
+        try:
+            kin_spos = {}
+            for stepper in self.kin_steppers:
+                pos_time = stepper.get_mcu().estimated_print_time(eventtime)
+                mcu_pos = stepper.get_past_mcu_position(pos_time)
+                kin_spos[stepper.get_name()] = (
+                    stepper.mcu_to_commanded_position(mcu_pos))
+            kin_pos = self.kin.calc_position(kin_spos)
+            display_pos = [
+                pos if pos is not None else commanded_pos[axis]
+                for axis, pos in enumerate(kin_pos)
+            ] + commanded_pos[3:]
+            self.last_display_position = display_pos
+            self.position_error_logged = False
+        except Exception:
+            # Status generation must remain safe during motion and shutdown.
+            if not self.position_error_logged:
+                logging.exception(
+                    "Unable to calculate current manual-jog position")
+                self.position_error_logged = True
+            display_pos = (self.last_display_position
+                           if self.last_display_position is not None
+                           else commanded_pos)
+        return self.toolhead.Coord(display_pos)
+
+    def get_status(self, eventtime):
+        if eventtime is None:
+            eventtime = self.reactor.monotonic()
+        active = self.active_input
+        blink_elapsed = max(0., eventtime - self.display_blink_epoch)
+        return {
+            'enabled': self.enabled,
+            'mode': self.motion_mode,
+            'display_blink': (self.enabled
+                              and bool(int(blink_elapsed
+                                           / DISPLAY_BLINK_INTERVAL) & 1)),
+            'position': self._get_display_position(eventtime),
+            'active': active is not None,
+            'axis': "" if active is None else "xyze"[active.axis],
+            'direction': 0 if active is None else active.direction,
+            'last_reject': self.last_reject,
+        }
+
+    def _job_reject_reason(self, eventtime, check_gcode=True,
+                           check_idle_state=True,
+                           allow_toolhead_completion=False):
+        if not self.is_ready or self.printer.is_shutdown():
+            return "printer is not ready"
+        if check_gcode and self.gcode_mutex.test():
+            return "G-Code is busy"
+        if self.virtual_sd is not None and self.virtual_sd.is_active():
+            return "a virtual SD print is active"
+        if self.pause_resume is not None and self.pause_resume.is_paused:
+            return "the printer is paused"
+        if self.print_stats is not None:
+            state = self.print_stats.get_status(eventtime)['state']
+            if state in ('printing', 'paused'):
+                return "print state is %s" % (state,)
+        idle_state = self.idle_timeout.get_status(eventtime)['state']
+        if check_idle_state and idle_state == 'Printing':
+            return "the printer is not idle"
+        print_time, est_print_time, lookahead_empty = (
+            self.toolhead.check_busy(eventtime))
+        if (not lookahead_empty
+            or (not allow_toolhead_completion
+                and print_time > est_print_time + 0.001)):
+            return "the toolhead is busy"
+        homed_axes = self.toolhead.get_status(eventtime)['homed_axes']
+        if any(axis not in homed_axes for axis in 'xyz'):
+            return "all XYZ axes must be homed"
+        return None
+
+    def _activation_reject_reason(self, eventtime, check_gcode=True):
+        reason = self._job_reject_reason(
+            eventtime, check_gcode=check_gcode, check_idle_state=True)
+        if reason is not None:
+            return reason
+        if any(jog_input.pressed for jog_input in self.inputs):
+            return "a motion button is pressed"
+        return None
+
+    def _set_enabled(self, enabled, reason=None):
+        enabled = bool(enabled)
+        if self.enabled == enabled:
+            return
+        self.enabled = enabled
+        eventtime = self.reactor.monotonic()
+        self.display_blink_epoch = eventtime
+        if not enabled and self.dispatch_active:
+            self.dispatch.trigger()
+        guard_time = self.reactor.NEVER
+        if enabled:
+            guard_time = eventtime + MODE_GUARD_INTERVAL
+        self.reactor.update_timer(self.mode_guard_timer, guard_time)
+        if enabled:
+            menu = self.printer.lookup_object('menu', None)
+            if menu is not None:
+                menu.exit(force=True)
+        display = self.printer.lookup_object('display', None)
+        if display is not None:
+            display.request_redraw()
+        if reason is not None:
+            logging.info("Manual jog mode disabled: %s", reason)
+        self.printer.send_event('jog_buttons:mode_changed', enabled)
+        self._signal_mode_change(enabled)
+
+    def _set_motion_mode(self, mode):
+        if self.motion_mode == mode:
+            return
+        self.motion_mode = mode
+        self.display_blink_epoch = self.reactor.monotonic()
+        display = self.printer.lookup_object('display', None)
+        if display is not None:
+            display.request_redraw()
+        self.printer.send_event('jog_buttons:motion_mode_changed', mode)
+
+    def _signal_mode_change(self, enabled):
+        if self.mode_beeper is None or self.printer.is_shutdown():
+            return
+        beeper = self.mode_beeper
+        beeper_mcu = beeper.mcu_pin.get_mcu()
+        min_schedule_time = beeper_mcu.min_schedule_time()
+        eventtime = self.reactor.monotonic() + min_schedule_time
+        min_print_time = beeper_mcu.estimated_print_time(eventtime)
+        if self.mode_beeper_type == 'pwm':
+            print_time = max(
+                min_print_time,
+                beeper.last_print_time + min_schedule_time)
+            cycle_time = 1. / self.mode_beep_frequency
+        else:
+            print_time = max(
+                min_print_time, beeper.gcrq.next_min_flush_time)
+        beep_count = 1 if enabled else 2
+        try:
+            for beep_index in range(beep_count):
+                if self.mode_beeper_type == 'pwm':
+                    beeper.mcu_pin.set_pwm_cycle(
+                        print_time, self.mode_beep_value, cycle_time)
+                else:
+                    beeper.mcu_pin.set_digital(print_time, 1.)
+                print_time += self.mode_beep_duration
+                if self.mode_beeper_type == 'pwm':
+                    beeper.mcu_pin.set_pwm_cycle(print_time, 0., cycle_time)
+                else:
+                    beeper.mcu_pin.set_digital(print_time, 0.)
+                if beep_index + 1 < beep_count:
+                    print_time += self.mode_beep_gap
+            beeper.last_value = 0.
+            if self.mode_beeper_type == 'pwm':
+                beeper.last_print_time = print_time
+                beeper.last_cycle_time = cycle_time
+            else:
+                beeper.gcrq.next_min_flush_time = max(
+                    beeper.gcrq.next_min_flush_time,
+                    print_time + min_schedule_time)
+        except Exception:
+            logging.exception("Unable to signal manual jog mode change")
+
+    def _mode_guard_event(self, eventtime):
+        if not self.enabled:
+            return self.reactor.NEVER
+        if self.active_input is not None:
+            return eventtime + MODE_GUARD_INTERVAL
+        reason = self._job_reject_reason(
+            eventtime, check_gcode=True, check_idle_state=False,
+            allow_toolhead_completion=True)
+        if reason is not None:
+            self.last_reject = reason
+            self._set_enabled(False, reason)
+            return self.reactor.NEVER
+        return eventtime + MODE_GUARD_INTERVAL
+
+    def _try_enable(self, eventtime, check_gcode=True, mode=None):
+        reason = self._activation_reject_reason(
+            eventtime, check_gcode=check_gcode)
+        if reason is not None:
+            self.last_reject = reason
+            return reason
+        self.last_reject = ""
+        if mode is not None:
+            self._set_motion_mode(mode)
+        self._set_enabled(True)
+        return None
+
+    def _motion_button_event(self, eventtime, jog_input, state):
+        jog_input.pressed = bool(state)
+        if jog_input.forwarded:
+            self._emit_virtual(eventtime, jog_input.name, state)
+            if not state:
+                jog_input.forwarded = False
+            return
+        if not state:
+            if self.active_input is jog_input and self.dispatch_active:
+                self.dispatch.trigger()
+            return
+        if not self.enabled:
+            jog_input.forwarded = True
+            self._emit_virtual(eventtime, jog_input.name, True)
+            return
+        if self.active_input is not None:
+            return
+        reason = self._job_reject_reason(
+            eventtime, check_gcode=True, check_idle_state=False,
+            allow_toolhead_completion=True)
+        if reason is not None:
+            self.last_reject = reason
+            self._set_enabled(False, reason)
+            jog_input.forwarded = True
+            self._emit_virtual(eventtime, jog_input.name, True)
+            return
+        if jog_input.axis == 3:
+            extruder = self.toolhead.get_extruder()
+            if (getattr(extruder, 'extruder_stepper', None) is None
+                or not extruder.get_heater().can_extrude):
+                self.last_reject = "active extruder is below minimum temp"
+                return
+        with self.gcode_mutex:
+            if self.motion_mode == 'step':
+                self._run_step_jog(jog_input)
+            else:
+                self._run_jog(jog_input)
+
+    def _ok_button_event(self, eventtime, state):
+        ok_input = self.ok_input
+        ok_input.pressed = bool(state)
+        if state:
+            ok_input.forwarded = False
+            self.ok_hold_handled = False
+            self.ok_hold_target = not self.enabled
+            if self.ok_hold_target:
+                reason = self._activation_reject_reason(eventtime)
+                if reason is not None:
+                    self.ok_hold_target = None
+                    ok_input.forwarded = True
+                    self._emit_virtual(eventtime, 'ok', True)
+                    return
+            self.reactor.update_timer(
+                self.ok_hold_timer, eventtime + self.enable_hold_time)
+            return
+        self.reactor.update_timer(
+            self.ok_hold_timer, self.reactor.NEVER)
+        if ok_input.forwarded:
+            self._emit_virtual(eventtime, 'ok', False)
+            ok_input.forwarded = False
+        elif (not self.ok_hold_handled and not self.ok_hold_target
+              and self.enabled):
+            mode = ('step' if self.motion_mode == 'continuous'
+                    else 'continuous')
+            self._set_motion_mode(mode)
+        elif not self.ok_hold_handled and self.ok_hold_target:
+            self._emit_virtual(eventtime, 'ok', True)
+            self.reactor.register_callback(
+                lambda e: self._emit_virtual(e, 'ok', False),
+                eventtime + VIRTUAL_CLICK_DELAY)
+        self.ok_hold_target = None
+        self.ok_hold_handled = False
+
+    def _ok_hold_event(self, eventtime):
+        if not self.ok_input.pressed or self.ok_hold_target is None:
+            return self.reactor.NEVER
+        if self.ok_hold_target:
+            reason = self._try_enable(eventtime)
+            if reason is not None:
+                self.ok_hold_target = None
+                self.ok_input.forwarded = True
+                self._emit_virtual(eventtime, 'ok', True)
+                return self.reactor.NEVER
+            self.gcode.respond_info("Manual jog mode enabled")
+        else:
+            self._set_enabled(False)
+            self.gcode.respond_info("Manual jog mode disabled")
+        self.ok_hold_handled = True
+        return self.reactor.NEVER
+
+    cmd_SET_JOG_MODE_help = "Enable or disable guarded manual jogging"
+    def cmd_SET_JOG_MODE(self, gcmd):
+        enable = bool(gcmd.get_int('ENABLE', minval=0, maxval=1))
+        mode = gcmd.get('MODE', None)
+        if mode is not None:
+            mode = mode.lower()
+            if mode not in ('continuous', 'step'):
+                raise gcmd.error("MODE must be CONTINUOUS or STEP")
+        if enable:
+            reason = self._try_enable(
+                self.reactor.monotonic(), check_gcode=False, mode=mode)
+            if reason is not None:
+                raise gcmd.error("Unable to enable manual jog mode: %s"
+                                  % (reason,))
+        else:
+            self._set_enabled(False)
+            if mode is not None:
+                self._set_motion_mode(mode)
+        state = "enabled" if self.enabled else "disabled"
+        gcmd.respond_info("Manual jog mode %s" % (state,))
+
+    def _handle_set_mode_request(self, web_request):
+        enable = web_request.get('enable', types=(bool, int))
+        if enable not in (False, True, 0, 1):
+            raise web_request.error("enable must be true or false")
+        mode = web_request.get('mode', None, types=(str,))
+        if mode is not None:
+            mode = mode.lower()
+            if mode not in ('continuous', 'step'):
+                raise web_request.error(
+                    "mode must be 'continuous' or 'step'")
+        if enable:
+            reason = self._try_enable(
+                self.reactor.monotonic(), mode=mode)
+            if reason is not None:
+                raise web_request.error(
+                    "Unable to enable manual jog mode: %s" % (reason,))
+        else:
+            self._set_enabled(False)
+            if mode is not None:
+                self._set_motion_mode(mode)
+        web_request.send(self.get_status(self.reactor.monotonic()))
+
+    def _calc_halt_position(self, start_kin_pos, start_mcu_pos):
+        halt_kin_pos = dict(start_kin_pos)
+        for stepper in self.kin_steppers:
+            step_delta = (stepper.get_mcu_position()
+                          - start_mcu_pos[stepper])
+            halt_kin_pos[stepper.get_name()] += (
+                step_delta * stepper.get_step_dist())
+        current_pos = self.toolhead.get_position()
+        halt_xyz = self.kin.calc_position(halt_kin_pos)
+        return [p if p is not None else current_pos[i]
+                for i, p in enumerate(halt_xyz)] + current_pos[3:]
+
+    def _sync_extruder_position(self, extruder, start_pos,
+                                start_mcu_pos):
+        extruder_stepper = extruder.extruder_stepper.stepper
+        step_delta = (extruder_stepper.get_mcu_position()
+                      - start_mcu_pos[extruder_stepper])
+        halt_e = start_pos[3] + step_delta * extruder_stepper.get_step_dist()
+        for stepper in self.trigger_steppers:
+            if stepper.get_trapq() is extruder.get_trapq():
+                stepper.set_position([halt_e, 0., 0.])
+        extruder.last_position = halt_e
+        self.toolhead.set_extruder(extruder, halt_e)
+
+    def _run_extruder_jog(self, jog_input, completion):
+        while jog_input.pressed and self.enabled:
+            target_pos = self.toolhead.get_position()
+            target_pos[3] += (
+                jog_input.direction * self.extrude_distance)
+            self.toolhead.drip_move(
+                target_pos, jog_input.speed, completion,
+                allow_extra_axes=True)
+            if completion.test():
+                break
+
+    def _run_step_jog(self, jog_input):
+        axis = jog_input.axis
+        current_pos = self.toolhead.get_position()
+        distance = (self.extrude_step_distance if axis == 3
+                    else self.step_distance)
+        if axis < 3:
+            status = self.toolhead.get_status(self.reactor.monotonic())
+            limit = (status['axis_maximum'][axis]
+                     if jog_input.direction > 0
+                     else status['axis_minimum'][axis])
+            remaining = (limit - current_pos[axis]) * jog_input.direction
+            if remaining < 0.000000001:
+                self.last_reject = "axis is at its software limit"
+                return
+            distance = min(distance, remaining)
+        target = current_pos[axis] + jog_input.direction * distance
+        coord = [None] * len(current_pos)
+        coord[axis] = target
+        self.active_input = jog_input
+        self.last_reject = ""
+        error = None
+        try:
+            self.toolhead.manual_move(coord, jog_input.speed)
+            self.toolhead.wait_moves()
+        except self.printer.command_error as e:
+            error = str(e)
+        except Exception:
+            logging.exception("Button step jog failed")
+            error = "internal step jog error"
+        finally:
+            self.active_input = None
+        if error is not None and not self.printer.is_shutdown():
+            self.last_reject = error
+            self.gcode.respond_info("Jog stopped: %s" % (error,))
+
+    def _run_jog(self, jog_input):
+        axis = jog_input.axis
+        current_pos = self.toolhead.get_position()
+        if axis < 3:
+            status = self.toolhead.get_status(self.reactor.monotonic())
+            limit = (status['axis_maximum'][axis]
+                     if jog_input.direction > 0
+                     else status['axis_minimum'][axis])
+            if abs(limit - current_pos[axis]) < 0.000000001:
+                self.last_reject = "axis is at its software limit"
+                return
+            target_pos = list(current_pos)
+            target_pos[axis] = limit
+        active_extruder = None
+        if axis == 3:
+            active_extruder = self.toolhead.get_extruder()
+        self.toolhead.flush_step_generation()
+        start_kin_pos = {
+            s.get_name(): s.get_commanded_position()
+            for s in self.kin_steppers
+        }
+        start_mcu_pos = {
+            s: s.get_mcu_position() for s in self.trigger_steppers
+        }
+        self.active_input = jog_input
+        self.last_reject = ""
+        error = None
+        reason = None
+        try:
+            print_time = self.toolhead.get_last_move_time()
+            completion = self.dispatch.start(print_time)
+            self.dispatch_active = True
+            if not jog_input.pressed or not self.enabled:
+                self.dispatch.trigger()
+            self.toolhead.dwell(HOMING_START_DELAY)
+            if axis == 3:
+                self._run_extruder_jog(jog_input, completion)
+            else:
+                self.toolhead.drip_move(
+                    target_pos, jog_input.speed, completion)
+        except self.printer.command_error as e:
+            error = str(e)
+            if self.dispatch_active:
+                self.dispatch.trigger()
+        except Exception:
+            logging.exception("Continuous button jog failed")
+            error = "internal jog error"
+            if self.dispatch_active:
+                self.dispatch.trigger()
+        finally:
+            if self.dispatch_active:
+                try:
+                    move_end_time = self.toolhead.get_last_move_time()
+                    try:
+                        self.dispatch.wait_end(move_end_time)
+                    finally:
+                        reason = self.dispatch.stop()
+                except Exception:
+                    logging.exception("Error stopping continuous button jog")
+                    if error is None:
+                        error = "unable to stop jog cleanly"
+                self.dispatch_active = False
+            if not self.printer.is_shutdown():
+                try:
+                    self.toolhead.flush_step_generation()
+                    halt_pos = self._calc_halt_position(
+                        start_kin_pos, start_mcu_pos)
+                    self.toolhead.set_position(halt_pos)
+                    if active_extruder is not None:
+                        self._sync_extruder_position(
+                            active_extruder, current_pos, start_mcu_pos)
+                except Exception:
+                    logging.exception(
+                        "Unable to synchronize position after jog")
+                    if error is None:
+                        error = "unable to synchronize position after jog"
+            self.active_input = None
+        if (reason is not None
+            and reason >= mcu.MCU_trsync.REASON_COMMS_TIMEOUT):
+            error = "communication timeout while stopping jog"
+        if error is not None and not self.printer.is_shutdown():
+            self.last_reject = error
+            self.gcode.respond_info("Jog stopped: %s" % (error,))
+
+
+def load_config(config):
+    return JogButtons(config)

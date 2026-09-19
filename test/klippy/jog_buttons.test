@@ -1,0 +1,7 @@
+# Config and MCU command generation test for [jog_buttons]
+CONFIG jog_buttons.cfg
+DICTIONARY atmega2560.dict
+
+G28
+SET_JOG_MODE ENABLE=0
+SET_JOG_MODE ENABLE=0 MODE=STEP

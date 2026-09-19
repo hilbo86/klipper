@@ -858,6 +858,16 @@ together with any of SHAPER_TYPE_X, SHAPER_TYPE_Y, and SHAPER_TYPE_Z
 parameters. See [config reference](Config_Reference.md#input_shaper)
 for more details on each of these parameters.
 
+### [jog_buttons]
+
+The following command is available when a
+[jog_buttons config section](Config_Reference.md#jog_buttons) is enabled.
+
+#### SET_JOG_MODE
+`SET_JOG_MODE ENABLE=<0|1> [MODE=<CONTINUOUS|STEP>]`: Enables or disables
+guarded manual jogging and optionally selects the motion mode. Enabling is
+rejected unless all XYZ axes are homed and the printer is idle.
+
 ### [led]
 
 The following command is available when any of the

@@ -3687,6 +3687,98 @@ pin:
 #   delay, the entire button press is ignored. Default is 0.
 ```
 
+### [jog_buttons]
+
+Continuous or fixed-distance step jogging of homed toolhead axes and the active
+extruder with physical buttons. Manual mode may only be enabled after all XYZ
+axes are homed and while the printer and G-Code processor are idle. Hold the
+configured OK button for at least two seconds to enable or disable manual mode.
+While manual mode is active, a short OK press switches between `continuous` and
+`step` mode. Continuous axis moves run toward their configured software limit
+and stop when the button is released. Step moves advance once per button press.
+Extruder moves are allowed only after the active extruder reaches its
+`min_extrude_temp`.
+
+When manual mode is disabled, physical button events are forwarded through
+logical pins named `jog_buttons:<option-name-without-_pin>`. For example,
+`click_pin: jog_buttons:ok` or `pin: jog_buttons:extrude_plus` may be used in a
+display or gcode_button section. The `[jog_buttons]` section must occur before
+sections which reference its logical pins. Logical pins do not support `!`,
+`^`, or `~` prefixes.
+
+If `emergency_stop_pin` is configured, its state is always published as
+`jog_buttons:emergency_stop`, including while manual mode is active. A press
+also invokes an immediate Klipper shutdown independently of the virtual pin
+consumer, manual mode, homing state, and G-Code processor availability.
+
+Manual mode can also be controlled with `SET_JOG_MODE ENABLE=<0|1>` or the
+`jog_buttons/set_mode` API endpoint with an `enable` boolean parameter. Both
+interfaces accept an optional `mode` of `continuous` or `step`. The
+`jog_buttons.enabled` and `jog_buttons.mode` status fields report the current
+state. While a jog is active, `jog_buttons.position` reports the expected
+current XYZ position reconstructed from the step history at the estimated MCU
+time. Starting another toolhead operation or disabling the steppers
+automatically disables manual mode.
+
+```
+[jog_buttons]
+#x_minus_pin:
+#x_plus_pin:
+#y_minus_pin:
+#y_plus_pin:
+#z_minus_pin:
+#z_plus_pin:
+#   Optional MCU pins for the axis direction buttons. The usual "^" pull-up
+#   and "!" invert prefixes may be used.
+#extrude_minus_pin:
+#extrude_plus_pin:
+#   Optional MCU pins for retracting or extruding with the active extruder.
+#   At least one axis or extruder motion pin must be provided.
+#ok_pin:
+#   Optional MCU pin used to toggle manual mode with a long press.
+#emergency_stop_pin:
+#   An optional MCU pin that immediately shuts down the printer when pressed.
+#   This input remains responsive while a jog holds the G-Code processor lock.
+#   Its state is also available as the jog_buttons:emergency_stop logical pin.
+#enable_hold_time: 2.0
+#   Duration of an OK-button hold which toggles manual mode. The minimum and
+#   default are two seconds.
+#step_distance: 1.0
+#   Distance in mm moved by an X, Y, or Z button press in step mode. A step is
+#   shortened when necessary to remain within the axis software limit. The
+#   default is 1 mm.
+#extrude_step_distance:
+#   Extrusion distance in mm per button press in step mode. The default is the
+#   configured step_distance.
+#xy_speed: 40.0
+#   Jog speed for the X and Y axes, in mm/s. The default is 40 mm/s.
+#z_speed: 5.0
+#   Jog speed for the Z axis, in mm/s. The default is 5 mm/s.
+#extrude_speed: 5.0
+#   Active-extruder jog speed, in mm/s. The default is 5 mm/s.
+#extrude_distance: 25.0
+#   Length of each uninterrupted extruder jog segment. The button remains held
+#   to start another segment. This must not exceed the active extruder's
+#   max_extrude_only_distance. The default is 25 mm.
+#mode_beeper:
+#   Name of an optional pwm_cycle_time section or non-PWM output_pin section
+#   used to signal manual-mode changes. Enabling produces one short beep and
+#   disabling produces two. A digital output_pin is suitable for a
+#   fixed-frequency buzzer.
+#mode_beep_frequency: 2000.0
+#   Frequency of the mode signal in Hz when mode_beeper names a
+#   pwm_cycle_time section. It is ignored for a digital output_pin. The
+#   default is 2000 Hz.
+#mode_beep_duration: 0.035
+#   Duration of each mode signal beep in seconds. The default is 0.035 seconds.
+#mode_beep_gap: 0.040
+#   Gap between the two disable beeps in seconds. The default is 0.040 seconds.
+#mode_beep_value: 0.5
+#   Normalized PWM duty value used while beeping. The default is 0.5.
+#debounce_delay: 0.0
+#   Additional button debounce time in seconds. The default is 0.
+```
+
 ### [output_pin]
 
 Run-time configurable output pins (one may define any number of

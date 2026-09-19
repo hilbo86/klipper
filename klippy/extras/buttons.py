@@ -318,6 +318,11 @@ class PrinterButtons:
             mcu = pin_params['chip']
             mcu_name = pin_params['chip_name']
             pin_params_list.append(pin_params)
+        # Virtual button providers may route logical button events directly
+        # instead of allocating an MCU config_buttons object.
+        register_virtual = getattr(mcu, 'register_button_callback', None)
+        if register_virtual is not None:
+            return register_virtual(pin_params_list, callback)
         # Register pins and callback with the appropriate MCU
         mcu_buttons = self.mcu_buttons.get(mcu_name)
         if (mcu_buttons is None
