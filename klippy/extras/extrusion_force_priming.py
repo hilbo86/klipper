@@ -9,7 +9,7 @@ import logging
 import time
 from datetime import datetime
 
-class PressurePriming:
+class ExtrusionForcePriming:
     def __init__(self, config):
         self.name = config.get_name()
         self.printer = config.get_printer()
@@ -219,4 +219,4 @@ class PressurePriming:
 
 
 def load_config(config):
-    return PressurePriming(config)
+    return ExtrusionForcePriming(config)
