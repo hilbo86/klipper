@@ -257,10 +257,17 @@ class LoadCellProbe:
 
         # subscribe to ADC callback
         max_val = self._max_abs_force / abs(self._force_calibration)
-        self._mcu_adc.setup_minmax(self._report_time, 1, -max_val, max_val)
-        self._mcu_adc.setup_adc_callback(
-            self._report_time, self._adc_callback
-        )
+        if hasattr(self._mcu_adc, "setup_adc_sample"):
+            self._mcu_adc.setup_adc_sample(
+                self._report_time, sample_time=self._report_time,
+                sample_count=1, minval=-max_val, maxval=max_val)
+            self._mcu_adc.setup_adc_callback(self._adc_batch_callback)
+        else:
+            # The standalone HX711 driver still uses the single-sample API.
+            self._mcu_adc.setup_minmax(
+                self._report_time, 1, -max_val, max_val)
+            self._mcu_adc.setup_adc_callback(
+                self._report_time, self._adc_callback)
 
         # do some late initialisation when ready
         self._printer.register_event_handler(
@@ -439,6 +446,10 @@ class LoadCellProbe:
     def _handle_ready(self):
         # obtain toolhead object
         self.tool = self._printer.lookup_object("toolhead")
+
+    def _adc_batch_callback(self, samples):
+        for sample_time, value in samples:
+            self._adc_callback(sample_time, value)
 
     def _adc_callback(self, time, value):
         # Preserve the original ADC value and convert it to grams.  Consumers

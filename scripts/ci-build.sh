@@ -70,6 +70,10 @@ start_test klippy "Test klippy import (Python3)"
 $PYTHON klippy/klippy.py --import-test
 finish_test klippy "Test klippy import (Python3)"
 
+start_test unittest "Test host unit regressions (Python3)"
+$PYTHON -m unittest discover -s test -p 'test_*.py'
+finish_test unittest "Test host unit regressions (Python3)"
+
 # start_test klippy "Test klippy import (Python2)"
 # $PYTHON2 klippy/klippy.py --import-test
 # finish_test klippy "Test klippy import (Python2)"
