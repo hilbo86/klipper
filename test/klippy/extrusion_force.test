@@ -1,4 +1,4 @@
-DICTIONARY hostsimulator.dict
+DICTIONARY atmega2560.dict
 CONFIG extrusion_force.cfg
 
 SET_FILAMENT_PROFILE PROFILE=F01_PLA_test
