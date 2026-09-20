@@ -17,6 +17,7 @@ from klippy.extras.extrusion_force_profile import (
     ForceProfile, ForceProfileManager, detect_knee)
 from klippy.extras.filament_profile import (
     FilamentProfile, FilamentProfileManager)
+from klippy.extras.z_sense_offset import SensingZOffset
 
 
 class FakeProfile:
@@ -622,6 +623,43 @@ class ControllerAndTransformTest(unittest.TestCase):
         control.move([20.0, 0.0, 0.0, 0.0], 100.0)
         self.assertEqual([move[1] for move in transform.moves],
                          [50.0, 100.0, 100.0])
+
+    def test_connect_chains_transforms_after_toolhead_exists(self):
+        class FakeToolhead:
+            def __init__(self):
+                self.position = [1.0, 2.0, 3.0, 4.0]
+
+            def get_position(self):
+                return list(self.position)
+
+            def move(self, position, speed):
+                self.position = list(position)
+
+        class FakeGCodeMove:
+            def __init__(self, toolhead):
+                self.toolhead = toolhead
+                self.move_transform = None
+
+            def set_move_transform(self, transform, force=False):
+                previous = self.move_transform or self.toolhead
+                self.move_transform = transform
+                return previous
+
+        gcode_move = FakeGCodeMove(FakeToolhead())
+        z_offset = object.__new__(SensingZOffset)
+        z_offset.gcode_move = gcode_move
+        z_offset.normal_transform = None
+        z_offset.z_offset = 0.25
+        control = object.__new__(ExtrusionForceControl)
+        control.gcode_move = gcode_move
+        control.normal_transform = None
+
+        z_offset._handle_connect()
+        control._handle_connect()
+
+        self.assertIs(z_offset.normal_transform, gcode_move.toolhead)
+        self.assertIs(control.normal_transform, z_offset)
+        self.assertEqual(control.get_position(), [1.0, 2.0, 2.75, 4.0])
 
     def test_controller_never_drops_below_minimum(self):
         controller = self.make_controller()
