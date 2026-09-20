@@ -7,6 +7,7 @@
 # Copyright (C) 2026  Timo Hilbig <timo@t-hilbig.de>
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
+import collections
 import logging
 
 
@@ -17,6 +18,8 @@ class ExtrusionForceFilamentChanger:
         self.gcode = self.printer.lookup_object("gcode")
         self.pheaters = self.printer.load_object(config, "heaters")
         self.load_cell = self.printer.lookup_object("load_cell")
+        self.monitor_name = config.get(
+            "monitor", "extrusion_force_monitor")
 
         # General thermal / sampling settings
         self.start_temp = config.getfloat("start_temp", 170.0, above=0.0)
@@ -131,6 +134,11 @@ class ExtrusionForceFilamentChanger:
 
         self.running = False
         self.tool = None
+        self.monitor = None
+        self.operation_owner = None
+        self.force_baseline = None
+        self.force_stream = collections.deque(maxlen=max(
+            self.zero_samples * 4, self.force_samples * 4, 32))
 
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
         self.gcode.register_command(
@@ -144,6 +152,11 @@ class ExtrusionForceFilamentChanger:
 
     def _handle_ready(self):
         self.tool = self.printer.lookup_object("toolhead")
+        self.monitor = self.printer.lookup_object(self.monitor_name, None)
+
+    def _sample_callback(self, sample):
+        self.force_stream.append(
+            (sample["print_time"], sample["absolute_force_g"]))
 
     # ------------------------------------------------------------------
     # Common helpers
@@ -205,22 +218,37 @@ class ExtrusionForceFilamentChanger:
             self.reactor.pause(self.reactor.monotonic() + 0.25)
 
     def _zero_force(self, gcmd):
-        self.gcode.run_script_from_command(
-            "LCP_COMPENSATE SAMPLES=%d" % (self.zero_samples,)
-        )
-        # Wait for at least one new ADC result using the new offset.
-        self.reactor.pause(self.reactor.monotonic() + self.sample_time * 2.0)
+        self.force_stream.clear()
+        deadline = self.reactor.monotonic() + max(
+            2.0, self.zero_samples * self.sample_time * 4.0)
+        while len(self.force_stream) < self.zero_samples:
+            if self.reactor.monotonic() >= deadline:
+                raise gcmd.error("Timeout collecting load-cell baseline")
+            self.reactor.pause(self.reactor.monotonic() + self.sample_time)
+        values = [value for _, value
+                  in list(self.force_stream)[-self.zero_samples:]]
+        self.force_baseline = sum(values) / len(values)
         force = self._read_force()
-        gcmd.respond_info("Load cell zeroed; force = %.1f" % (force,))
+        gcmd.respond_info(
+            "Local load-cell baseline captured; force = %.1fg" % (force,))
 
     def _read_force(self, samples=None):
         if samples is None:
             samples = self.force_samples
-        values = []
-        for _ in range(samples):
+        if self.force_baseline is None:
+            raise self.printer.command_error("Load-cell baseline is not set")
+        initial_time = self.force_stream[-1][0] if self.force_stream else None
+        deadline = self.reactor.monotonic() + max(
+            1.0, samples * self.sample_time * 4.0)
+        while (len(self.force_stream) < samples
+               or (initial_time is not None
+                   and self.force_stream[-1][0] <= initial_time)):
+            if self.reactor.monotonic() >= deadline:
+                raise self.printer.command_error(
+                    "Timeout collecting load-cell samples")
             self.reactor.pause(self.reactor.monotonic() + self.sample_time)
-            status = self.load_cell.get_status(self.reactor.monotonic())
-            values.append(float(status["last_force"]))
+        values = [value - self.force_baseline
+                  for _, value in list(self.force_stream)[-samples:]]
         return sum(values) / len(values)
 
     def _check_force(self, gcmd, force):
@@ -268,11 +296,20 @@ class ExtrusionForceFilamentChanger:
     def _status_due(self, now, next_status):
         return now >= next_status
 
-    def _begin_operation(self, gcmd, extr_name):
+    def _begin_operation(self, gcmd, extr_name, owner):
         if self.running:
             raise gcmd.error(
                 "A load-cell filament operation is already running")
+        status = self.load_cell.get_status(self.reactor.monotonic())
+        if not status.get("is_calibrated", False):
+            raise gcmd.error("Load cell must be calibrated in grams")
         previous_extruder = self.tool.get_extruder().get_name()
+        if self.monitor is not None:
+            self.monitor.claim_operation(owner)
+        self.operation_owner = owner
+        self.load_cell.add_client(self._sample_callback)
+        self.force_stream.clear()
+        self.force_baseline = None
         self.running = True
         try:
             self.gcode.run_script_from_command(
@@ -280,6 +317,10 @@ class ExtrusionForceFilamentChanger:
             )
             self._activate_extruder(extr_name)
         except Exception:
+            self.load_cell.remove_client(self._sample_callback)
+            if self.monitor is not None:
+                self.monitor.release_operation(owner)
+            self.operation_owner = None
             self.running = False
             raise
         return previous_extruder
@@ -296,6 +337,11 @@ class ExtrusionForceFilamentChanger:
         except Exception:
             logging.exception(
                 "Unable to restore G-code state after filament operation")
+        self.load_cell.remove_client(self._sample_callback)
+        if self.monitor is not None and self.operation_owner is not None:
+            self.monitor.release_operation(self.operation_owner)
+        self.operation_owner = None
+        self.force_baseline = None
         self.running = False
 
     # ------------------------------------------------------------------
@@ -318,7 +364,8 @@ class ExtrusionForceFilamentChanger:
             "LENGTH", self.unload_total_length, above=0.0
         )
 
-        previous_extruder = self._begin_operation(gcmd, name)
+        previous_extruder = self._begin_operation(
+            gcmd, name, "UNLOAD_FILAMENT")
         deadline = self.reactor.monotonic() + self.operation_timeout
         heater_off = False
 
@@ -522,13 +569,19 @@ class ExtrusionForceFilamentChanger:
             minval=0, maxval=1
         ))
 
-        previous_extruder = self._begin_operation(gcmd, name)
+        previous_extruder = self._begin_operation(
+            gcmd, name, "LOAD_FILAMENT")
         deadline = self.reactor.monotonic() + self.operation_timeout
         previous_target = self._target_temperature(extr)
 
         try:
-            # Klipper already calculates filament_area from filament_diameter.
-            max_e_speed = min(max_flow / extr.filament_area,
+            filament_area = extr.filament_area
+            filament_manager = self.printer.lookup_object(
+                "filament_profile_manager", None)
+            if filament_manager is not None:
+                filament_area = filament_manager.get_filament_area(
+                    name, filament_area)
+            max_e_speed = min(max_flow / filament_area,
                               extr.max_e_velocity)
             if max_e_speed <= 0.0:
                 raise gcmd.error("Calculated load speed is invalid")

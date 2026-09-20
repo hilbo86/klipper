@@ -109,6 +109,7 @@ nav:
       - Resonance_Compensation.md
       - Measuring_Resonances.md
     - Pressure_Advance.md
+    - Extrusion_Force.md
     - G-Codes.md
     - Command templates:
       - Command_Templates.md

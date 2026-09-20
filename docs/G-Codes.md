@@ -1329,10 +1329,11 @@ the PROBE command for details on the optional probe parameters. The
 optional `RETRIES`, `RETRY_TOLERANCE`, and `HORIZONTAL_MOVE_Z` values
 override those options specified in the config file.
 
-### [load_cell_probe]
+### [load_cell_probe_renkforce]
 
 The following commands are available when a
-[load_cell_probe config section](Config_Reference.md#load_cell_probe) is enabled
+[load_cell_probe_renkforce config section](Config_Reference.md#load_cell_probe_renkforce)
+is enabled
 (also see the [Load-cell probe guide](LoadCellProbe.md)):
 
 #### PROBE
@@ -1362,11 +1363,10 @@ Determine the `noise_level` configuration parameter from the given number of
 samples (defaults to 50).
 
 #### LCP_CALIB_WEIGHT
-`LCP_CALIB_WEIGHT WEIGHT=<weight> [SAMPLES=<n>]`:  Only used for the initial
-calibration. Determine the `force_calibration` configuration parameter, assuming
-the current ADC reading is the equivalent of the given `weight` value (in
-used-defined physical units). The optional number of samples is used for
-averaging (defaults to 10).
+`LCP_CALIB_WEIGHT WEIGHT=<weight> [SAMPLES=<n>]`: Only used for the initial
+calibration. Determine the `force_calibration` configuration parameter. `WEIGHT`
+is specified in grams and the resulting calibration uses grams per ADC unit.
+The optional number of samples is used for averaging (defaults to 10).
 
 #### LCP_CALIB_STIFFNESS
 `LCP_CALIB_STIFFNESS [SAMPLES=<n>]`: Only used for the initial calibration.
@@ -1377,6 +1377,108 @@ optional number of samples is used for averaging (defaults to 10).
 #### LCP_INFO
 `LCP_INFO`: Print parameters used by the load cell probe algorithms to the
 console. Useful for debugging and testing.
+
+### [filament_profile]
+
+#### SET_FILAMENT_PROFILE
+`SET_FILAMENT_PROFILE PROFILE=<name> [EXTRUDER=<name>]`: Select a
+printer-independent filament profile. Without `EXTRUDER`, it applies to the
+currently active extruder. If exactly one extrusion-force profile references
+that filament through `valid_for` and matches the extruder's configured nozzle
+diameter, that force profile is selected automatically. If none matches, any
+previous force profile for the extruder is disabled. Multiple matches are a
+configuration error. An optional filament-profile diameter overrides the
+nominal extruder diameter only for extrusion-force flow calculations. If the
+matching printer-specific force profile defines `pressure_advance`, that value
+is applied to the selected extruder.
+
+### [extrusion_force_profile]
+
+#### SET_EXTRUSION_FORCE_PROFILE
+`SET_EXTRUSION_FORCE_PROFILE PROFILE=<name> [EXTRUDER=<name>]`: Select the
+force profile used for an extruder. Without `EXTRUDER`, the profile is assigned
+to every extruder in its configured `extruder` list. With `EXTRUDER`, only that
+compatible extruder is changed. The selected profile must match the extruder's
+configured `nozzle_diameter`. This lower-level command also selects the
+referenced filament profile and applies the profile's optional
+`pressure_advance` value.
+
+### [extrusion_force_calibration]
+
+#### FORCE_FLOW_CALIBRATE
+`FORCE_FLOW_CALIBRATE PROFILE=<name> [EXTRUDER=<name>]
+TEMPERATURES=<t1,t2,...> FLOW_START=<flow> FLOW_STEP=<flow>
+FLOW_MAX=<flow> [SETTLE_TIME=<seconds>] [MEASURE_TIME=<seconds>]
+[ABORT_FORCE=<grams>]`: Record steady-state force curves and stage their
+profile data for `SAVE_CONFIG`. The nozzle must be homed, clear of the bed,
+hot enough to extrude, and protected by a configured force ceiling. `EXTRUDER`
+is required when the profile is configured for multiple extruders.
+
+#### FORCE_RESPONSE_CALIBRATE
+`FORCE_RESPONSE_CALIBRATE PROFILE=<name> [EXTRUDER=<name>]
+TEMPERATURE=<degrees_C> FLOW_LOW=<flow> FLOW_HIGH=<flow>
+[DURATION=<seconds>] [ABORT_FORCE=<grams>]`: Measure rise and fall response
+time constants and stage them for `SAVE_CONFIG`. `EXTRUDER` is required when
+the profile is configured for multiple extruders.
+
+### [z_sense_offset]
+
+#### Z_SENSE_OFFSET
+`Z_SENSE_OFFSET [MAX_Z_OFFSET=<mm>] [FORCE_THRESHOLD=<grams>]`: Enable
+first-layer upward-only Z compensation. With an active profile it uses dynamic
+excess force; `FORCE_THRESHOLD` is retained as a legacy fallback.
+
+#### Z_FORCE_CALIBRATE
+`Z_FORCE_CALIBRATE [EXTRUDER=<name>] LINE_LENGTH=<mm> LINE_SPEED=<mm/s>
+[LINE_SPACING=<mm>] FLOW=<mm^3/s> Z_STEP=<mm> STEPS=<count>
+ABORT_FORCE=<grams> MAX_GEOMETRIC_ERROR=<mm> [REFERENCE_MARGIN=<grams>]`:
+Print stepped calibration lines to estimate excess-force slope over Z
+compression. This deliberately moves Z downward during calibration; validate
+the starting first layer and use a conservative force ceiling.
+
+### [extrusion_force_guard]
+
+#### SET_EXTRUSION_FORCE_GUARD
+`SET_EXTRUSION_FORCE_GUARD ENABLE=<0|1>`: Enable or disable delivery-failure,
+overload, jam, and partial-clog monitoring. All detection thresholds must be
+configured before it can be enabled.
+
+### [extruder_force_current]
+
+#### EXTRUDER_CURRENT_CALIBRATE
+`EXTRUDER_CURRENT_CALIBRATE PROFILE=<name> [EXTRUDER=<name>]
+CURRENT_MIN=<amps> CURRENT_MAX=<amps> CURRENT_STEP=<amps>
+TEMPERATURE=<degrees_C> FORCE_CEILING=<grams> FLOW_START=<flow>
+FLOW_MAX=<flow> FLOW_STEP=<flow> [REPEATS=<count>]
+[REQUIRED_FORCE=<grams>] [SAVE=<0|1>]`: Measure a force/current curve and
+recommend the lowest run current with configured reserve. The original current
+and temperature target are restored on every exit. `SAVE=1` only stages the
+result; it does not run `SAVE_CONFIG`. `EXTRUDER` is required when the profile
+is configured for multiple extruders.
+
+### [extrusion_force_control]
+
+#### SET_EXTRUSION_FORCE_CONTROL
+`SET_EXTRUSION_FORCE_CONTROL [SPEED=<0|1>] [TEMP=<0|1>]`: Enable adaptive
+positive-extrusion speed limiting and the optional slower temperature-assist
+loop. Temperature assistance requires speed control.
+
+### [extrusion_force_diagnostics]
+
+#### EXTRUSION_FORCE_DIAGNOSTIC
+`EXTRUSION_FORCE_DIAGNOSTIC [PROFILE=<name>] [EXTRUDER=<name>]
+TEMPERATURE=<degrees_C> FLOW=<mm^3/s> LENGTH=<mm>
+ABORT_FORCE=<grams>`: Run a reference extrusion and report measured versus
+profile force. When `PROFILE` names a shared profile, `EXTRUDER` is required.
+
+#### EXTRUSION_FORCE_PA_ANALYZE
+`EXTRUSION_FORCE_PA_ANALYZE [PROFILE=<name>] [EXTRUDER=<name>]
+PA_VALUES=<v1,v2,...> TEMPERATURE=<degrees_C> FLOW_LOW=<flow>
+FLOW_HIGH=<flow> [SEGMENT_TIME=<seconds>] ABORT_FORCE=<grams>`: Experimental
+force-response comparison for several pressure-advance values. It restores the
+original PA value, reports only a range for subsequent visual testing, and
+never writes configuration. When `PROFILE` names a shared profile, `EXTRUDER`
+is required.
 
 
 ### [query_adc]
