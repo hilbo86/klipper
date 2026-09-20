@@ -263,6 +263,10 @@ class ExtrusionForceGuard:
 
     def cmd_SET_GUARD(self, gcmd):
         enabled = bool(gcmd.get_int("ENABLE", 1, minval=0, maxval=1))
+        if not enabled and self.logic is None:
+            self.fault_pending = False
+            gcmd.respond_info("Extrusion force guard disabled")
+            return
         if self.logic is None:
             self._build_logic()
         self.logic.set_enabled(enabled)

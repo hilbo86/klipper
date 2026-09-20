@@ -4,7 +4,8 @@ import unittest
 from klippy.extras.extrusion_force_calibration import estimate_response_tau
 from klippy.extras.extruder_force_current import (
     select_run_current, validate_current_curve)
-from klippy.extras.extrusion_force_guard import ExtrusionForceGuardLogic
+from klippy.extras.extrusion_force_guard import (
+    ExtrusionForceGuard, ExtrusionForceGuardLogic)
 from klippy.extras.extrusion_force_control import (
     ExtrusionForceControl, SpeedController)
 from klippy.extras.extrusion_force_diagnostics import (
@@ -524,6 +525,28 @@ class GuardAndCurrentTest(unittest.TestCase):
                 e_position=-index, motion="RETRACT"))
             self.assertIsNone(fault)
             self.assertNotIn("delivery_failure", events)
+
+    def test_explicit_disable_does_not_require_detection_thresholds(self):
+        class GCmd:
+            def __init__(self):
+                self.messages = []
+
+            def get_int(self, name, default, **kwargs):
+                return 0
+
+            def respond_info(self, message):
+                self.messages.append(message)
+
+        guard = object.__new__(ExtrusionForceGuard)
+        guard.logic = None
+        guard.fault_pending = True
+        gcmd = GCmd()
+
+        guard.cmd_SET_GUARD(gcmd)
+
+        self.assertIsNone(guard.logic)
+        self.assertFalse(guard.fault_pending)
+        self.assertEqual(gcmd.messages, ["Extrusion force guard disabled"])
 
     def test_short_underload_recovers_without_fault(self):
         guard = self.make_guard()
