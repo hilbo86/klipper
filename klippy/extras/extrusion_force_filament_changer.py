@@ -10,6 +10,8 @@
 import collections
 import logging
 
+from .extrusion_force_motion import MotionForceSampler
+
 
 class ExtrusionForceFilamentChanger:
     def __init__(self, config):
@@ -18,6 +20,7 @@ class ExtrusionForceFilamentChanger:
         self.gcode = self.printer.lookup_object("gcode")
         self.pheaters = self.printer.load_object(config, "heaters")
         self.load_cell = self.printer.lookup_object("load_cell")
+        self.motion = MotionForceSampler(config)
         self.monitor_name = config.get(
             "monitor", "extrusion_force_monitor")
 
@@ -137,6 +140,7 @@ class ExtrusionForceFilamentChanger:
         self.monitor = None
         self.operation_owner = None
         self.force_baseline = None
+        self.overpressure = False
         self.force_stream = collections.deque(maxlen=max(
             self.zero_samples * 4, self.force_samples * 4, 32))
 
@@ -155,8 +159,13 @@ class ExtrusionForceFilamentChanger:
         self.monitor = self.printer.lookup_object(self.monitor_name, None)
 
     def _sample_callback(self, sample):
+        self.motion.add_sample(sample)
         self.force_stream.append(
             (sample["print_time"], sample["absolute_force_g"]))
+        if (self.force_baseline is not None
+                and abs(sample["absolute_force_g"] - self.force_baseline)
+                >= self.force_safety_limit):
+            self.overpressure = True
 
     # ------------------------------------------------------------------
     # Common helpers
@@ -218,6 +227,7 @@ class ExtrusionForceFilamentChanger:
             self.reactor.pause(self.reactor.monotonic() + 0.25)
 
     def _zero_force(self, gcmd):
+        self.tool.wait_moves()
         self.force_stream.clear()
         deadline = self.reactor.monotonic() + max(
             2.0, self.zero_samples * self.sample_time * 4.0)
@@ -240,19 +250,19 @@ class ExtrusionForceFilamentChanger:
         initial_time = self.force_stream[-1][0] if self.force_stream else None
         deadline = self.reactor.monotonic() + max(
             1.0, samples * self.sample_time * 4.0)
-        while (len(self.force_stream) < samples
-               or (initial_time is not None
-                   and self.force_stream[-1][0] <= initial_time)):
+        while True:
+            values = [value - self.force_baseline
+                      for time, value in self.force_stream
+                      if initial_time is None or time > initial_time]
+            if len(values) >= samples:
+                return sum(values[-samples:]) / samples
             if self.reactor.monotonic() >= deadline:
                 raise self.printer.command_error(
                     "Timeout collecting load-cell samples")
             self.reactor.pause(self.reactor.monotonic() + self.sample_time)
-        values = [value - self.force_baseline
-                  for _, value in list(self.force_stream)[-samples:]]
-        return sum(values) / len(values)
 
     def _check_force(self, gcmd, force):
-        if abs(force) >= self.force_safety_limit:
+        if self.overpressure or abs(force) >= self.force_safety_limit:
             raise gcmd.error(
                 "Load-cell safety limit exceeded: %.1f (limit %.1f)"
                 % (force, self.force_safety_limit)
@@ -265,6 +275,8 @@ class ExtrusionForceFilamentChanger:
     def _move_e(self, gcmd, extr, delta, speed):
         if not delta:
             return
+        if self.overpressure:
+            raise gcmd.error("Load-cell safety limit exceeded before movement")
         if not extr.get_status(self.reactor.monotonic())["can_extrude"]:
             raise gcmd.error(
                 "%s is below min_extrude_temp during filament movement"
@@ -275,8 +287,26 @@ class ExtrusionForceFilamentChanger:
             raise gcmd.error("Invalid extrusion speed")
         pos = self.tool.get_position()
         pos[3] += float(delta)
+        start_time = self.tool.get_last_move_time()
         self.tool.manual_move(pos, speed)
+        end_time = self.tool.get_last_move_time()
         self.tool.wait_moves()
+        if self.overpressure:
+            raise gcmd.error("Load-cell safety limit exceeded during movement")
+        return start_time, end_time
+
+    def _probe_movement(self, gcmd, extr, delta, speed, force_limit):
+        before = self.motion.idle(gcmd, self.tool)
+        # Slow short probes down so even a 16 SPS cell sees multiple samples.
+        speed = min(speed, abs(delta) / self.motion.sample_time)
+        start, end = self._move_e(gcmd, extr, delta, speed)
+        moving = self.motion.collect(gcmd, start, end)
+        after = self.motion.idle(gcmd, self.tool)
+        for value in moving + before + after:
+            self._check_force(gcmd, value - self.force_baseline)
+        return self.motion.check(
+            moving, before, after, self.force_baseline,
+            1.0 if delta > 0.0 else -1.0, force_limit)
 
     def _ramp_temperature(self, extr, target, max_temp):
         new_target = min(target + self.temp_step, max_temp,
@@ -310,6 +340,8 @@ class ExtrusionForceFilamentChanger:
         self.load_cell.add_client(self._sample_callback)
         self.force_stream.clear()
         self.force_baseline = None
+        self.overpressure = False
+        self.motion.reset()
         self.running = True
         try:
             self.gcode.run_script_from_command(
@@ -382,39 +414,51 @@ class ExtrusionForceFilamentChanger:
             self._zero_force(gcmd)
             origin_e = self.tool.get_position()[3]
 
-            # Phase 2: Build the requested tensile force at 170C.
+            # Phase 2: Build tension, or detect filament already moving at
+            # the starting temperature without reaching the holding force.
             stable = 0
+            released = False
             while stable < 2:
                 self._check_timeout(gcmd, deadline)
                 force = self._read_force()
                 self._check_force(gcmd, force)
                 retracted = origin_e - self.tool.get_position()[3]
-                if retracted > self.unload_preload_max:
-                    raise gcmd.error(
-                        "Unable to build unload force before %.1fmm retraction"
-                        % (self.unload_preload_max,)
-                    )
-
                 if force > target_force + self.unload_force_tolerance:
-                    self._move_e(
-                        gcmd, extr, -self.unload_preload_step,
-                        self.unload_control_speed
-                    )
+                    if retracted >= min(self.unload_preload_max, total_length):
+                        raise gcmd.error(
+                            "Unable to build unload force before %.1fmm "
+                            "retraction" % min(self.unload_preload_max,
+                                               total_length))
+                    step = min(self.unload_preload_step,
+                               self.unload_preload_max - retracted,
+                               total_length - retracted,
+                               total_length / self.motion.confirmations)
+                    released = self._probe_movement(
+                        gcmd, extr, -step, self.unload_control_speed,
+                        abs(target_force))
+                    if released:
+                        gcmd.respond_info(
+                            "Unload motion detected below holding force "
+                            "(motion/idle delta %.1fg)" % self.motion.delta)
+                        break
                     stable = 0
                 elif force < target_force - self.unload_force_tolerance:
+                    self.motion.matches = 0
                     self._move_e(
                         gcmd, extr, self.unload_control_step * 0.5,
                         self.unload_control_speed
                     )
                     stable = 0
                 else:
+                    self.motion.matches = 0
                     stable += 1
 
             preload_e = self.tool.get_position()[3]
-            gcmd.respond_info(
-                "Unload preload established: force %.0f, retracted %.2fmm"
-                % (self._read_force(), origin_e - preload_e)
-            )
+            if not released:
+                gcmd.respond_info(
+                    "Unload preload established: force %.0f, retracted %.2fmm"
+                    % (self._read_force(), origin_e - preload_e)
+                )
 
             # Phase 3: Slowly raise temperature while maintaining tension.
             # Release is detected either by a distinct force relaxation or by
@@ -424,7 +468,6 @@ class ExtrusionForceFilamentChanger:
             next_status = self.reactor.monotonic()
             prev_force = self._read_force()
             max_temp_since = None
-            released = False
 
             while not released:
                 self._check_timeout(gcmd, deadline)
@@ -462,6 +505,11 @@ class ExtrusionForceFilamentChanger:
                     )
                     break
 
+                remaining = total_length - (
+                    origin_e - self.tool.get_position()[3])
+                if remaining <= 0.0:
+                    raise gcmd.error(
+                        "Unload LENGTH reached before filament release")
                 set_temp, next_temp_step = self._maybe_ramp_temperature(
                     extr, set_temp, max_temp, next_temp_step, now
                 )
@@ -470,18 +518,24 @@ class ExtrusionForceFilamentChanger:
                 # the probe move in the dead band a static elastic preload can
                 # remain indefinitely even after the filament has softened.
                 if force > target_force + self.unload_force_tolerance:
-                    self._move_e(
-                        gcmd, extr, -self.unload_control_step,
-                        self.unload_control_speed
-                    )
+                    released = self._probe_movement(
+                        gcmd, extr, -min(self.unload_control_step, remaining),
+                        self.unload_control_speed, abs(target_force))
+                    if released:
+                        gcmd.respond_info(
+                            "Unload motion detected below holding force "
+                            "(motion/idle delta %.1fg)" % self.motion.delta)
+                        break
                 elif force < target_force - self.unload_force_tolerance:
+                    self.motion.matches = 0
                     self._move_e(
                         gcmd, extr, self.unload_control_step * 0.5,
                         self.unload_control_speed
                     )
                 else:
+                    self.motion.matches = 0
                     self._move_e(
-                        gcmd, extr, -self.unload_probe_step,
+                        gcmd, extr, -min(self.unload_probe_step, remaining),
                         self.unload_control_speed
                     )
 
@@ -600,42 +654,60 @@ class ExtrusionForceFilamentChanger:
             self._zero_force(gcmd)
             seek_origin_e = self.tool.get_position()[3]
 
-            # Phase 2: Feed until the filament builds the initial +force.
+            # Phase 2: Find contact or repeated low-force forward motion.
             stable = 0
+            flowing = False
+            motion_origin_e = None
             while stable < 2:
                 self._check_timeout(gcmd, deadline)
                 force = self._read_force()
                 self._check_force(gcmd, force)
                 advanced = self.tool.get_position()[3] - seek_origin_e
-                if advanced > self.load_seek_max:
-                    raise gcmd.error(
-                        "No load-cell contact before %.1fmm feed"
-                        % (self.load_seek_max,)
-                    )
-
                 if force < target_force - self.load_force_tolerance:
-                    self._move_e(
-                        gcmd, extr, self.load_seek_step, max_e_speed
-                    )
+                    if advanced >= self.load_seek_max:
+                        raise gcmd.error(
+                            "No load-cell contact before %.1fmm feed"
+                            % (self.load_seek_max,))
+                    probe_origin = self.tool.get_position()[3]
+                    flowing = self._probe_movement(
+                        gcmd, extr,
+                        min(self.load_seek_step, self.load_seek_max - advanced,
+                            total_length / self.motion.confirmations),
+                        max_e_speed, target_force)
+                    if self.motion.matches == 1:
+                        motion_origin_e = probe_origin
+                    elif not self.motion.matches:
+                        motion_origin_e = None
+                    if flowing:
+                        break
                     stable = 0
                 elif force > target_force + self.load_force_tolerance:
+                    self.motion.matches = 0
+                    motion_origin_e = None
                     self._move_e(
                         gcmd, extr, -self.load_control_step * 0.5,
                         max_e_speed * self.load_min_feed_factor
                     )
                     stable = 0
                 else:
+                    self.motion.matches = 0
+                    motion_origin_e = None
                     stable += 1
 
             # This is the requested logical E=0 point.  It is kept local to
             # this module so a paused print's G-code extrusion coordinate is
             # not destroyed by a G92 command.
-            load_zero_e = self.tool.get_position()[3]
-            gcmd.respond_info(
-                "Load force reached; local extrusion length zeroed at "
-                "force %.0f"
-                % (self._read_force(),)
-            )
+            load_zero_e = (motion_origin_e if flowing
+                           else self.tool.get_position()[3])
+            if flowing:
+                gcmd.respond_info(
+                    "Load motion detected below target force "
+                    "(motion/idle delta %.1fg); probe feed counts toward LENGTH"
+                    % self.motion.delta)
+            else:
+                gcmd.respond_info(
+                    "Load force reached; local extrusion length zeroed at "
+                    "force %.0f" % (self._read_force(),))
 
             # Phase 3: Continue heating while force control advances filament.
             # The normal temperature ramp stops once 3mm net feed is achieved.
@@ -644,8 +716,8 @@ class ExtrusionForceFilamentChanger:
             next_status = self.reactor.monotonic()
             max_temp_since = None
 
-            while (self.tool.get_position()[3] - load_zero_e
-                   < self.load_heat_hold_length):
+            while (not flowing and self.tool.get_position()[3] - load_zero_e
+                   < min(self.load_heat_hold_length, total_length)):
                 self._check_timeout(gcmd, deadline)
                 now = self.reactor.monotonic()
                 force = self._read_force()
@@ -665,6 +737,7 @@ class ExtrusionForceFilamentChanger:
                     next_status = now + self.status_interval
 
                 if force > overforce:
+                    self.motion.matches = 0
                     # Relieve excessive compression.  Temperature may continue
                     # to rise, but only through the normal timed ramp above.
                     self._move_e(
@@ -672,21 +745,31 @@ class ExtrusionForceFilamentChanger:
                         max_e_speed * self.load_min_feed_factor
                     )
                 elif force < target_force - self.load_force_tolerance:
-                    self._move_e(
-                        gcmd, extr, self.load_control_step, max_e_speed
-                    )
+                    flowing = self._probe_movement(
+                        gcmd, extr,
+                        min(self.load_control_step, total_length - progress),
+                        max_e_speed, target_force)
+                    if flowing:
+                        gcmd.respond_info(
+                            "Load motion detected below target force "
+                            "(motion/idle delta %.1fg); temperature ramp held"
+                            % self.motion.delta)
+                        break
                 elif force > target_force + self.load_force_tolerance:
+                    self.motion.matches = 0
                     self._move_e(
                         gcmd, extr, -self.load_control_step * 0.5,
                         max_e_speed * self.load_min_feed_factor
                     )
                 else:
+                    self.motion.matches = 0
                     # Deliberate creep in the force dead band.  A rigid plug
                     # pushes the force back up; softened filament permits net
                     # forward motion and the 3mm progress criterion can
                     # complete.
                     self._move_e(
-                        gcmd, extr, self.load_probe_step,
+                        gcmd, extr,
+                        min(self.load_probe_step, total_length - progress),
                         max_e_speed * self.load_min_feed_factor
                     )
 
@@ -791,7 +874,7 @@ class ExtrusionForceFilamentChanger:
                     )
 
             gcmd.respond_info(
-                "LOAD_FILAMENT completed: %.1fmm extruded after force contact; "
+                "LOAD_FILAMENT completed: %.1fmm fed after contact/motion; "
                 "final target %.1fC"
                 % (self.tool.get_position()[3] - load_zero_e, set_temp)
             )

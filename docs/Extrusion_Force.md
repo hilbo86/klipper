@@ -118,6 +118,91 @@ operation lock, so only one mechanical load-cell operation can run at once.
 Subscribers are removed and original targets/state are restored in `finally`
 paths.
 
+### Filament that moves below the target force
+
+Loading and unloading also compare force **during** a short extruder move with
+settled idle samples before and after it. Compression must increase for loading;
+tension must increase for unloading. Two consecutive probes must show a
+repeatable difference above both the configured minimum and three times the
+measured idle noise. The moving-force median rejects isolated impulses. All
+samples must remain below the requested force magnitude for this alternative
+completion criterion. A static elastic preload, sensor drift, insufficient
+samples, or motion in the wrong force direction does not confirm transport.
+
+`UNLOAD_FILAMENT` proceeds with the remaining pull when motion is detected,
+without requiring the holding force or a higher starting temperature.
+`LOAD_FILAMENT` leaves the contact search and holds the starting temperature if
+filament already moves. Feed from the first of the confirming probes counts
+toward `LENGTH`. If contact initially requires the usual target force, the
+temperature ramp still runs; subsequent low-force motion can stop that ramp.
+The absolute force safety limit is checked on individual samples, including
+those received during motion, and prevents further moves after a violation.
+
+Both `[extrusion_force_filament_changer]` and `[extrusion_force_priming]` accept
+these optional settings (defaults shown):
+
+```ini
+motion_force_delta: 25.0
+# Minimum directional moving/idle force difference, in grams.
+motion_confirmations: 2
+# Consecutive qualifying probes; at least two.
+motion_sample_time: 0.3
+# Minimum duration of a probe move and each idle sampling window, in seconds.
+motion_settle_time: 0.2
+# Wait before sampling stationary force, in seconds.
+motion_sample_timeout: 2.0
+# Maximum wait for delivery of timestamped samples after a window has ended.
+```
+
+Probe speeds are reduced as needed to obtain multiple measurements even with a
+16 SPS cell; they remain within the configured extrusion speed/flow limits.
+Each window needs at least three samples. Increase `motion_sample_time` for
+slower sensors and `motion_settle_time` if force takes longer to relax. Force
+windows use the ADC sample's `print_time`, including delayed callbacks.
+
+### Low-force priming and heater demand
+
+`PRESSURE_PRIME` still succeeds on two stable segments above `THRESHOLD`.
+Below that threshold, motion/idle force evidence must additionally coincide
+with a sustained increase in heater power over idle demand. This prevents
+friction from filament that has not yet reached the melt zone from being enough
+to report successful priming.
+
+After heating to `TARGET_TEMP`, priming records a stable idle temperature and
+mean heater power before feeding. During priming it samples power every 100 ms
+and compares a rolling mean, including short measurement pauses, with that
+baseline. Including pauses accommodates the heater's delayed response to cold
+filament. Temperature must stay near the same target, and the power increase
+must exceed both the configured minimum and three times idle power noise in
+both halves of the observation window, so one PWM peak is insufficient.
+The command reports idle power and the required increase for tuning.
+
+Additional optional `[extrusion_force_priming]` settings (defaults shown):
+
+```ini
+thermal_baseline_time: 5.0
+# Stable idle observation duration, in seconds.
+thermal_settle_timeout: 30.0
+# Maximum baseline settling time; must exceed thermal_baseline_time.
+thermal_confirm_time: 2.0
+# Duration of the rolling heater-demand comparison, in seconds.
+thermal_power_delta: 0.02
+# Minimum increase in heater PWM duty, from 0 to 1: 0.02 is 2 percentage points.
+thermal_temperature_tolerance: 2.0
+# Permitted deviation from TARGET_TEMP, in degrees C.
+```
+
+The idle baseline also requires a temperature range no greater than half the
+tolerance, a net temperature change no greater than a quarter of it, and a
+difference between the first and second halves' mean power no greater than
+`thermal_power_delta`. This excludes the tail of the initial heating ramp.
+If no stable baseline is available before the settling timeout, only the
+original force-threshold criterion can succeed. Low force alone, increased
+power alone, or a temperature drop alone does not confirm priming. Length and
+force limits remain active, including a fractional final millimeter of `LENGTH`.
+Tune the new thresholds against recorded behavior of the actual hotend; this
+is an inference of transport, not a direct measurement of filament motion.
+
 ## Diagnostics and replay
 
 `EXTRUSION_FORCE_DIAGNOSTIC` compares a repeatable reference extrusion against
