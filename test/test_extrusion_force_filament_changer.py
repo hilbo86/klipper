@@ -4,8 +4,12 @@ from klippy.extras.extrusion_force_filament_changer import (
     ExtrusionForceFilamentChanger)
 from klippy.extras.extrusion_force_motion import MotionForceSampler
 from klippy.extras.extrusion_force_priming import ExtrusionForcePriming
-from test.test_extrusion_force_priming import (
-    CommandError, FakeConfig, FakeGCmd, FakeThermal, ThermalClock)
+if __package__:
+    from .test_extrusion_force_priming import (
+        CommandError, FakeConfig, FakeGCmd, FakeThermal, ThermalClock)
+else:
+    from test_extrusion_force_priming import (
+        CommandError, FakeConfig, FakeGCmd, FakeThermal, ThermalClock)
 
 
 class MotionForceSamplerTest(unittest.TestCase):

@@ -1,4 +1,4 @@
-DICTIONARY klipper.dict
+DICTIONARY hostsimulator.dict
 CONFIG extrusion_force.cfg
 
 SET_FILAMENT_PROFILE PROFILE=F01_PLA_test
