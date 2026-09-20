@@ -16,6 +16,8 @@ class SensingZOffset:
     def __init__(self, config):
         self.name = config.get_name()
         self.printer = config.get_printer()
+        self.printer.register_event_handler(
+            "klippy:connect", self._handle_connect)
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
 
         self.monitor_name = config.get(
@@ -71,15 +73,20 @@ class SensingZOffset:
         self.calibration_samples = []
         self.calibration_error = None
 
-        # Each transform keeps the previous transform and forwards into it.
-        # This makes load order with extrusion_force_control interchangeable.
-        gcode_move = self.printer.load_object(config, "gcode_move")
-        self.normal_transform = gcode_move.set_move_transform(self, force=True)
+        # Toolhead is created after config sections are loaded. Install this
+        # transform during connect so the first transform can wrap toolhead
+        # instead of capturing None during configuration.
+        self.gcode_move = self.printer.load_object(config, "gcode_move")
+        self.normal_transform = None
         self.printer.register_event_handler(
             "homing:home_rails_end", self._handle_home_rails_end)
 
     cmd_Z_SENSE_OFFSET_help = (
         "Increase Z offset from model-adjusted extrusion force")
+
+    def _handle_connect(self):
+        self.normal_transform = self.gcode_move.set_move_transform(
+            self, force=True)
 
     def cmd_Z_SENSE_OFFSET(self, gcmd):
         self.max_z_offset = gcmd.get_float(

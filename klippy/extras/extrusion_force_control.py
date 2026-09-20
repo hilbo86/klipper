@@ -163,11 +163,18 @@ class ExtrusionForceControl:
         self.gcode.register_command(
             "SET_EXTRUSION_FORCE_CONTROL", self.cmd_SET_CONTROL,
             desc="Enable or disable adaptive extrusion force control")
+        self.printer.register_event_handler(
+            "klippy:connect", self._handle_connect)
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
 
-        # Chain with any transform already present (notably z_sense_offset).
-        gcode_move = self.printer.load_object(config, "gcode_move")
-        self.normal_transform = gcode_move.set_move_transform(self, force=True)
+        # Chain after toolhead exists and after any earlier transform's connect
+        # callback (notably z_sense_offset) has installed that transform.
+        self.gcode_move = self.printer.load_object(config, "gcode_move")
+        self.normal_transform = None
+
+    def _handle_connect(self):
+        self.normal_transform = self.gcode_move.set_move_transform(
+            self, force=True)
 
     def _build_controller(self):
         soft_margin = (self.soft_force_margin
