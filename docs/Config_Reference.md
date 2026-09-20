@@ -2494,6 +2494,8 @@ TrapQ data. See [Extrusion force monitoring](Extrusion_Force.md).
 Filament profiles contain only properties of the filament and can therefore
 be shared unchanged by different printers. They are commonly kept in a
 separate `filaments.cfg` file and included from the printer configuration.
+Printer-specific values such as `pressure_advance` are rejected here and
+belong in the matching `[extrusion_force_profile]`.
 
 ```
 [filament_profile <name>]
@@ -2531,6 +2533,11 @@ extruder: extruder
 nozzle_diameter:
 #   This value must be provided and must equal the value in a selected
 #   extruder section.
+#pressure_advance:
+#   Optional pressure advance value for this printer, filament, and nozzle
+#   combination. It is applied to the selected extruder when this profile is
+#   activated, including activation through SET_FILAMENT_PROFILE. If omitted,
+#   profile selection does not change the extruder's current pressure advance.
 #temperature_tolerance: 2.0
 #   Maximum distance in degrees Celsius outside the calibrated temperature
 #   range at which an endpoint may still be used. As it qualifies the

@@ -37,6 +37,9 @@ from recorded data before enabling either module.
    must match the relevant extruder section. Run
    `FORCE_FLOW_CALIBRATE` with conservative `ABORT_FORCE`, flows, and
    temperatures. Specify `EXTRUDER` when calibrating a shared profile.
+   Store pressure advance in the printer-specific force profile when it should
+   be applied automatically with the filament selection; do not put it in the
+   portable filament profile.
 5. Review the generated points and recommended limits, then run `SAVE_CONFIG`.
    Select the portable filament identity from filament start G-code with, for
    example, `SET_FILAMENT_PROFILE PROFILE=F01_ASA_Apollox`. The matching

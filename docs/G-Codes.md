@@ -1386,7 +1386,9 @@ that filament through `valid_for` and matches the extruder's configured nozzle
 diameter, that force profile is selected automatically. If none matches, any
 previous force profile for the extruder is disabled. Multiple matches are a
 configuration error. An optional filament-profile diameter overrides the
-nominal extruder diameter only for extrusion-force flow calculations.
+nominal extruder diameter only for extrusion-force flow calculations. If the
+matching printer-specific force profile defines `pressure_advance`, that value
+is applied to the selected extruder.
 
 ### [extrusion_force_profile]
 
@@ -1396,7 +1398,8 @@ force profile used for an extruder. Without `EXTRUDER`, the profile is assigned
 to every extruder in its configured `extruder` list. With `EXTRUDER`, only that
 compatible extruder is changed. The selected profile must match the extruder's
 configured `nozzle_diameter`. This lower-level command also selects the
-referenced filament profile.
+referenced filament profile and applies the profile's optional
+`pressure_advance` value.
 
 ### [extrusion_force_calibration]
 

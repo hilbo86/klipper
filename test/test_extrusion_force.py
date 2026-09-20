@@ -134,6 +134,13 @@ class ProfileTest(unittest.TestCase):
 
 
 class ProfileExtruderAssignmentTest(unittest.TestCase):
+    class GCode:
+        def __init__(self):
+            self.scripts = []
+
+        def run_script_from_command(self, script):
+            self.scripts.append(script)
+
     class Gcmd:
         def __init__(self, **params):
             self.params = params
@@ -162,12 +169,13 @@ class ProfileExtruderAssignmentTest(unittest.TestCase):
         def lookup_object(self, name, default=None):
             return self.objects.get(name, default)
 
-    def make_profile(self, name, extruders):
+    def make_profile(self, name, extruders, pressure_advance=None):
         profile = object.__new__(ForceProfile)
         profile.name = name
         profile.extruders = tuple(extruders)
         profile.extruder = profile.extruders[0]
         profile.valid_for = "filament"
+        profile.pressure_advance = pressure_advance
         profile.filament_profile = None
         profile.compatibility_errors = {
             extruder: [] for extruder in profile.extruders}
@@ -179,6 +187,7 @@ class ProfileExtruderAssignmentTest(unittest.TestCase):
         manager.profiles = {}
         manager.active = {}
         manager.filament_manager = None
+        manager.gcode = self.GCode()
         return manager
 
     def test_resolve_requires_extruder_for_shared_profile(self):
@@ -232,6 +241,19 @@ class ProfileExtruderAssignmentTest(unittest.TestCase):
         self.assertIs(manager.get_active("extruder"), initial)
         self.assertIs(manager.get_active("extruder1"), selected)
 
+    def test_set_applies_pressure_advance_to_requested_extruder(self):
+        manager = self.make_manager()
+        profile = self.make_profile(
+            "selected", ("extruder", "extruder1"),
+            pressure_advance=0.045)
+        manager.add_profile(profile)
+
+        manager.cmd_SET_PROFILE(self.Gcmd(
+            PROFILE="selected", EXTRUDER="extruder1"))
+
+        self.assertEqual(manager.gcode.scripts, [
+            "SET_PRESSURE_ADVANCE EXTRUDER=extruder1 ADVANCE=0.045"])
+
     def test_set_rejects_extruder_outside_profile(self):
         manager = self.make_manager()
         profile = self.make_profile("shared", ("extruder", "extruder1"))
@@ -268,6 +290,21 @@ class FilamentProfileSelectionTest(unittest.TestCase):
     class Printer(ProfileExtruderAssignmentTest.Printer):
         pass
 
+    class FilamentConfig:
+        def get_printer(self):
+            return object()
+
+        def get_name(self):
+            return "filament_profile portable"
+
+        def get(self, name, default=None):
+            if name == "pressure_advance":
+                return "0.05"
+            return default
+
+        def error(self, message):
+            return ValueError(message)
+
     def make_managers(self):
         printer = self.Printer()
         extruder = type("Extruder", (), {
@@ -281,6 +318,7 @@ class FilamentProfileSelectionTest(unittest.TestCase):
         force_manager.profiles = {}
         force_manager.active = {}
         force_manager.filament_manager = None
+        force_manager.gcode = ProfileExtruderAssignmentTest.GCode()
         printer.objects["extrusion_force_profile_manager"] = force_manager
 
         filament_manager = object.__new__(FilamentProfileManager)
@@ -300,16 +338,22 @@ class FilamentProfileSelectionTest(unittest.TestCase):
         filament.filament_area = math.pi * (1.70 * 0.5) ** 2
         return filament
 
-    def make_force_profile(self, name, valid_for, compatible=True):
+    def make_force_profile(self, name, valid_for, compatible=True,
+                           pressure_advance=None):
         profile = object.__new__(ForceProfile)
         profile.name = name
         profile.extruders = ("extruder",)
         profile.extruder = "extruder"
         profile.valid_for = valid_for
+        profile.pressure_advance = pressure_advance
         profile.filament_profile = None
         profile.compatibility_errors = {
             "extruder": [] if compatible else ["hardware mismatch"]}
         return profile
+
+    def test_portable_profile_rejects_pressure_advance(self):
+        with self.assertRaisesRegex(ValueError, "printer-specific"):
+            FilamentProfile(self.FilamentConfig())
 
     def test_portable_selection_activates_matching_force_profile(self):
         _, filament_manager, force_manager = self.make_managers()
@@ -325,6 +369,21 @@ class FilamentProfileSelectionTest(unittest.TestCase):
 
         self.assertIs(filament_manager.get_active("extruder"), filament)
         self.assertIs(force_manager.get_active("extruder"), profile)
+
+    def test_portable_selection_applies_printer_specific_pressure_advance(self):
+        _, filament_manager, force_manager = self.make_managers()
+        filament = self.make_filament("F01_ASA_Apollox")
+        profile = self.make_force_profile(
+            "rf2000_asa", filament.name, pressure_advance=0.052)
+        profile.bind_filament_profile(filament)
+        filament_manager.add_profile(filament)
+        force_manager.add_profile(profile)
+
+        filament_manager.cmd_SET_FILAMENT_PROFILE(self.Gcmd(
+            PROFILE=filament.name, EXTRUDER="extruder"))
+
+        self.assertEqual(force_manager.gcode.scripts, [
+            "SET_PRESSURE_ADVANCE EXTRUDER=extruder ADVANCE=0.052"])
 
     def test_selection_disables_stale_force_profile_without_match(self):
         _, filament_manager, force_manager = self.make_managers()

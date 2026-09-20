@@ -15,6 +15,10 @@ class FilamentProfile:
         if len(name_parts) != 2:
             raise config.error("filament_profile requires a name")
         self.name = name_parts[1]
+        if config.get("pressure_advance", None) is not None:
+            raise config.error(
+                "pressure_advance in [%s] is printer-specific; configure "
+                "it in an extrusion_force_profile" % (self.section_name,))
         self.material = config.get("material")
         self.max_material_temperature = config.getfloat(
             "max_material_temperature", None, above=0.0)

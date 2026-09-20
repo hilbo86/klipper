@@ -372,9 +372,10 @@ Each profile reports its `name`, descriptive `material`, optional
 ## extrusion_force_profile
 
 Each profile reports its `valid_for` filament reference,
-material/extruder/nozzle identity, filament diameter, compatible and
-incompatible extruders (including mismatch reasons), calibration point count,
-material temperature ceiling, and rise/fall response constants.
+material/extruder/nozzle identity, optional `pressure_advance`, filament
+diameter, compatible and incompatible extruders (including mismatch reasons),
+calibration point count, material temperature ceiling, and rise/fall response
+constants.
 
 ## extrusion_force_guard
 

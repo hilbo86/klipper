@@ -84,6 +84,8 @@ class ForceProfile:
         self.extruder = self.extruders[0]
         self.valid_for = config.get("valid_for")
         self.nozzle_diameter = config.getfloat("nozzle_diameter", above=0.0)
+        self.pressure_advance = config.getfloat(
+            "pressure_advance", None, minval=0.0)
         for moved_option in ("material", "max_material_temperature"):
             if config.get(moved_option, None) is not None:
                 destination = "[%s]" % (
@@ -359,6 +361,7 @@ class ForceProfile:
             "valid_for": self.valid_for,
             "material": self.material,
             "nozzle_diameter": self.nozzle_diameter,
+            "pressure_advance": self.pressure_advance,
             "filament_diameter": self.filament_diameter,
             "max_material_temperature": self.max_material_temperature,
             "compatible_extruders": [
@@ -388,8 +391,8 @@ class ForceProfileManager:
         self.filament_manager = None
         self.printer.register_event_handler(
             "klippy:connect", self._handle_connect)
-        gcode = self.printer.lookup_object("gcode")
-        gcode.register_command(
+        self.gcode = self.printer.lookup_object("gcode")
+        self.gcode.register_command(
             "SET_EXTRUSION_FORCE_PROFILE", self.cmd_SET_PROFILE,
             desc="Select a calibrated extrusion-force profile")
 
@@ -445,7 +448,15 @@ class ForceProfileManager:
                    ", ".join(profile.name for profile in matching)))
         return matching[0] if matching else None
 
+    def _apply_pressure_advance(self, extruder, profile):
+        if profile is None or profile.pressure_advance is None:
+            return
+        self.gcode.run_script_from_command(
+            "SET_PRESSURE_ADVANCE EXTRUDER=%s ADVANCE=%.9g"
+            % (extruder, profile.pressure_advance))
+
     def activate_for_filament(self, extruder, profile):
+        self._apply_pressure_advance(extruder, profile)
         if profile is None:
             self.active.pop(extruder, None)
             profile_name = None
