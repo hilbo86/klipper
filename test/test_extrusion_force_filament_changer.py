@@ -156,6 +156,9 @@ class SimExtruder:
     def get_heater(self):
         return self
 
+    def get_temp(self, time):
+        return self.temperature, self.target
+
     def get_status(self, time):
         return {"target": self.target, "temperature": self.temperature,
                 "can_extrude": True}
@@ -196,6 +199,9 @@ class SimPrinter:
 
     def get_reactor(self):
         return self.reactor
+
+    def is_shutdown(self):
+        return False
 
     def lookup_object(self, name, default=None):
         return {"load_cell": self.cell, "gcode": self, "heaters": self,
