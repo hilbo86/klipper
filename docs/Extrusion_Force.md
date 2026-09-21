@@ -10,9 +10,11 @@ measured force with a filament/nozzle profile.
 The protection layers remain independent:
 
 1. `max_abs_force` is the MCU-adjacent final force limit.
-2. `extrusion_force_guard` confirms delivery failure or jam and may pause.
-3. Adaptive speed reduces only positive-extrusion move speed.
-4. Optional adaptive temperature reacts only after sustained speed limiting.
+2. `load_cell_homing_guard` observes homing forces and can stop a confirmed
+   collision once axis-specific limits have been measured.
+3. `extrusion_force_guard` confirms delivery failure or jam and may pause.
+4. Adaptive speed reduces only positive-extrusion move speed.
+5. Optional adaptive temperature reacts only after sustained speed limiting.
 
 Never use adaptive control as a replacement for `max_abs_force`. Guard and
 control thresholds deliberately have no guessed detection defaults; derive them
@@ -21,8 +23,8 @@ from recorded data before enabling either module.
 ## Initial setup
 
 1. Configure and calibrate `[load_cell_probe_renkforce]`. `force_calibration`
-   is grams per ADC unit; use `sensor_orientation` so applied extrusion force
-   has the intended sign. Confirm `printer.load_cell.is_calibrated` and
+   is always positive grams per ADC unit; use `sensor_orientation` so normal
+   extrusion force is positive. Confirm `printer.load_cell.is_calibrated` and
    `printer.load_cell.force_g` in Mainsail.
 2. Add `[extrusion_force_monitor]` only. Leave guard and adaptive features off.
 3. Record the `extrusion_force/dump` stream during safe test extrusions. Confirm
@@ -35,8 +37,10 @@ from recorded data before enabling either module.
    with a comma-separated `extruder` list; use a single-extruder profile only
    for a measured hardware difference. The force profile's `nozzle_diameter`
    must match the relevant extruder section. Run
-   `FORCE_FLOW_CALIBRATE` with conservative `ABORT_FORCE`, flows, and
-   temperatures. Specify `EXTRUDER` when calibrating a shared profile.
+   `FORCE_FLOW_CALIBRATE` with conservative `ABORT_FORCE`, an independently
+   measured `OPERATIONAL_FORCE_LIMIT`, flows, and temperatures. The first
+   limit aborts calibration; the second bounds recommended sustained flow.
+   Specify `EXTRUDER` when calibrating a shared profile.
    Store pressure advance in the printer-specific force profile when it should
    be applied automatically with the filament selection; do not put it in the
    portable filament profile.
@@ -62,6 +66,12 @@ because it controls use of the calibrated temperature domain.
 
 ## Fault detection
 
+The monitor publishes the active operation owner. The extrusion guard and
+adaptive controller enter `SUSPENDED` automatically while calibration,
+priming, or filament handling holds the operation lock. Adaptive temperature
+assistance restores its base target during suspension. The independent ADC
+force limit remains active.
+
 The guard evaluates only sufficiently confident `EXTRUSION_STEADY` samples.
 Delivery failure requires all of the following: commanded flow, meaningful
 expected force, measured underload, minimum elapsed time, and minimum commanded
@@ -71,6 +81,27 @@ flow transient, or very slow extrusion as runout.
 A soft positive excess-force margin emits an overload event for adaptive
 control. A separately configured hard margin must persist before it is called a
 jam. The long-term health EWMA is informative and does not pause by itself.
+
+## Homing collision observation
+
+`[load_cell_homing_guard]` samples `absolute_force_g` directly. Before an
+ordinary endstop homing move, it enables the extruder steppers without moving
+filament, waits for settling, and measures a local baseline and noise while
+the axes are still. A three-sample median rejects isolated ADC spikes. The
+effective threshold is the maximum of the configured axis/common limit, a
+noise multiple, and an optional fraction of the baseline magnitude. Positive
+and negative deviations are treated equally. Expected load-cell probe contact
+uses the probe's own safety logic.
+
+Start with `enabled: True` and `mode: diagnostic`. Repeat normal X, Y, and Z
+homing at least ten times each, including with loaded filament, and inspect
+`axis_peaks`, `peak_delta_g`, `peak_rate_g_s`, and `noise_g` in the guard
+status. Set each
+productive threshold above repeatable normal peaks. Then test `mode: abort`
+without collision retract using a soft, controlled obstacle. After validating
+the stopped position and failure state, optional short backoff can be enabled.
+The sample rate and motion queue determine the response time; this guard does
+not replace the MCU force limit.
 
 ## Z sensing
 

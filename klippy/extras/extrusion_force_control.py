@@ -166,6 +166,8 @@ class ExtrusionForceControl:
         self.printer.register_event_handler(
             "klippy:connect", self._handle_connect)
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
+        self.printer.register_event_handler(
+            "extrusion_force:operation_changed", self._operation_changed)
 
         # Chain after toolhead exists and after any earlier transform's connect
         # callback (notably z_sense_offset) has installed that transform.
@@ -206,7 +208,9 @@ class ExtrusionForceControl:
             len(position) > 3 and len(current) > 3
             and position[3] > current[3] + 1e-12)
         if (positive_extrusion and self.controller is not None
-                and self.controller.enabled):
+                and self.controller.enabled
+                and (getattr(self, "monitor", None) is None
+                     or self.monitor.get_active_operation() is None)):
             speed *= self.controller.speed_factor
         self.normal_transform.move(position, speed)
 
@@ -290,10 +294,30 @@ class ExtrusionForceControl:
             self.temperature_recovery_since = None
 
     def _handle_state(self, state):
+        if self.monitor.get_active_operation() is not None:
+            self.controller.speed_factor = 1.0
+            self.controller.state = "SUSPENDED"
+            return
+        if self.controller.state == "SUSPENDED":
+            self.controller.state = "NORMAL"
         event = self.controller.update(state)
         if event is not None:
             self.printer.send_event("extrusion_force:%s" % (event,), state)
         self._update_temperature(state)
+
+    def _operation_changed(self, owner):
+        if owner is not None and self.controller is not None:
+            self.controller.speed_factor = 1.0
+            self.controller.state = "SUSPENDED"
+            self.controller.last_update = None
+            self.controller.overload_since = None
+            self.controller.recovery_since = None
+            self._disable_temperature_assist()
+
+    def _disable_temperature_assist(self):
+        was_enabled = self.temperature_enabled
+        self._disable_temperature()
+        self.temperature_enabled = was_enabled
 
     def _disable_temperature(self):
         if (self.adaptive_delta > 0.0 and self.latest_extruder is not None
@@ -336,6 +360,8 @@ class ExtrusionForceControl:
             "speed_factor": (self.controller.speed_factor
                              if self.controller is not None else 1.0),
             "adaptive_temperature": self.temperature_enabled,
+            "operation_owner": (self.monitor.get_active_operation()
+                                if self.monitor is not None else None),
             "temperature_state": self.temperature_state,
             "base_target": self.base_target,
             "adaptive_delta": self.adaptive_delta,

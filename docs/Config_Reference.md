@@ -2443,7 +2443,9 @@ max_abs_force:
 # load-cell probe guide.
 #
 force_calibration:
-#   Conversion factor in grams per ADC unit. If omitted, the historical
+#   Positive conversion factor in grams per ADC unit. The direction is set
+#   only by sensor_orientation. LCP_CALIB_WEIGHT accepts a load in either
+#   direction and always saves a positive scale. If omitted, the historical
 #   internal value 1 is used for probe compatibility, but the load_cell status
 #   remains uncalibrated and does not publish that value as force_g.
 #sensor_orientation: normal
@@ -2487,7 +2489,58 @@ TrapQ data. See [Extrusion force monitoring](Extrusion_Force.md).
 #extruder_switch_settle_time: 0.5
 #callback_rate: 20.0
 #   Maximum public callback rate. May not exceed 20Hz.
+#   The status reports operation_active and operation_owner. Guard and
+#   adaptive control suspend automatically while a claimed operation runs.
 ```
+
+### [load_cell_homing_guard]
+
+Optional load-cell collision observation during ordinary X/Y/Z endstop homing.
+It subscribes directly to timestamped load-cell samples and uses its own
+stationary baseline. Load-cell probing is excluded so expected probe contact
+uses the probe's own limits. Start in diagnostic mode and measure repeated
+normal homing peaks for each axis before selecting abort thresholds. The
+independent `max_abs_force` ADC limit stays active in every mode.
+
+```
+[load_cell_homing_guard]
+#enabled: False
+#mode: diagnostic
+#   "diagnostic" records peaks without stopping; "abort" stops a homing
+#   drip move after a confirmed collision. The default is diagnostic.
+#load_cell: load_cell
+#monitor: extrusion_force_monitor
+#settle_time: 0.2
+#baseline_time: 0.3
+#   Extruder steppers are enabled without extrusion; axes remain still while
+#   the local baseline and noise are sampled. At least three samples are
+#   required. Choose baseline_time to suit the ADC sample rate.
+#enable_extruder_steppers: True
+#minimum_collision_force:
+#collision_force_x:
+#collision_force_y:
+#collision_force_z:
+#   Force limits in grams. Each selected axis needs its own limit or the
+#   common minimum in abort mode. No force limit is assumed by default.
+#noise_factor: 8.0
+#relative_baseline_factor: 0.0
+#force_rate_threshold:
+#confirm_time: 0.02
+#guard_x: True
+#guard_y: True
+#guard_z: True
+#collision_retract: False
+#collision_retract_distance: 2.0
+#collision_retract_speed: 5.0
+#   Optional backoff is disabled by default. Validate aborts without backoff
+#   before enabling it. A failed homing axis remains unhomed.
+```
+
+Status exposes baseline, noise, effective threshold, peak force deviation,
+peak rate, cumulative peaks by axis, motion vector, state, and last collision.
+Events are
+`load_cell_homing:armed`, `load_cell_homing:collision`,
+`load_cell_homing:retracted`, and `load_cell_homing:finished`.
 
 ### [filament_profile]
 
@@ -2566,9 +2619,14 @@ the extrusion-force subsystem; it does not modify a core printer object.
 #baseline_time: 1.0
 #purge_length: 5.0
 #purge_flow: 2.0
-#abort_force:
-#   Default force ceiling in grams. Either this or ABORT_FORCE on every
-#   calibration command must be specified.
+#calibration_abort_force:
+#   Hard calibration ceiling in grams. The legacy abort_force and command
+#   ABORT_FORCE remain accepted. One of these must be set for calibration.
+#operational_force_limit:
+#   Independent maximum sustained extrusion force in grams used to derive
+#   recommended flow limits. Can be supplied per run as
+#   OPERATIONAL_FORCE_LIMIT. It must be measured and is never inferred from
+#   the calibration abort ceiling.
 #abort_force_rate:
 #   Optional force-rise ceiling in grams/s.
 #minimum_knee_slope_ratio: 2.0

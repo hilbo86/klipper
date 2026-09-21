@@ -174,8 +174,11 @@ class LoadCellProbe:
         force_calibration = config.get("force_calibration", None)
         self._is_force_calibrated = force_calibration is not None
         self._force_calibration = config.getfloat(
-            "force_calibration", default=1.0
+            "force_calibration", default=1.0, above=0.0
         )
+        if (not math.isfinite(self._force_calibration)
+                or self._force_calibration <= 0.0):
+            raise config.error("force_calibration must be finite and positive")
         self._orientation = config.getchoice(
             "sensor_orientation", {"normal": 1.0, "inverted": -1.0},
             default="normal"
@@ -723,6 +726,8 @@ class LoadCellProbe:
     def cmd_LCP_CALIB_WEIGHT(self, gcmd):
         sample_count = gcmd.get_int("SAMPLES", 10, minval=2)
         weight = gcmd.get_float("WEIGHT", above=0.0)
+        if not math.isfinite(weight):
+            raise gcmd.error("WEIGHT must be finite")
         gcmd.respond_info(
             f"Determine weight calibration from {sample_count:d} samples "
             f"using weight {weight:.6f}:"
@@ -736,7 +741,7 @@ class LoadCellProbe:
             raise gcmd.error(
                 f"Measured force too close to noise level: {force:.6f}"
             )
-        correction_factor = weight / force
+        correction_factor = weight / abs(force)
         self._force_calibration *= correction_factor
         self._is_force_calibrated = True
         gcmd.respond_info(

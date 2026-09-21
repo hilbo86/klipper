@@ -147,8 +147,8 @@ A semi-automatic procedure has been developed to determine good parameters for
 the algorithm on new printer models. The following parameters need to be
 determined:
 
-- `force_calibration`: Conversion factor in grams per ADC unit. All force
-  parameters use grams.
+- `force_calibration`: Positive conversion factor in grams per ADC unit.
+  `sensor_orientation` alone sets the sign. All force parameters use grams.
 - `max_abs_force`: Maximum acceptable force in grams.
 - `stiffness`: Stiffness/"spring constant" of the mechanical system, i.e. force
   per distance.
@@ -170,9 +170,9 @@ compatible with Klipper's load-cell API and Mainsail.
    monitored throughout the process. Alternatively, the `LCP_READ` can be
    used. Absolute values do not matter, also the direction of the changes (sign
    of the differences) should not play any role, but make sure that the dynamic
-   range of the ADC is used well enough: if the maximum value of the ADC is
-   1.0 (which should be the case if the driver follows the Klipper standards),
-   the `max_abs_force` should ideally be in the range of 0.5 to 1.0.
+   range of the ADC is used well enough. Choose `max_abs_force` in grams
+   from the mechanical safety limit and ensure it is within ADC range after
+   calibration.
 2. Eliminate external forces to the hotend and load cells as much as possible,
    i.e. unload the filament and detach the bowden lining (if applicable).
 3. Determine the noise level by executing the `LCP_CALIB_NOISE` command. Do not
@@ -189,10 +189,11 @@ compatible with Klipper's load-cell API and Mainsail.
    super important here, the calibration is just needed to get a rough idea of
    the forces. Execute the command `LCP_CALIB_WEIGHT WEIGHT=<known_weight>`
    while replacing `<known_weight>` with the known weight in grams (just the
-   number, without unit).
-   Once the command is complete, execute `SAVE_CONFIG`. Note that this will
-   convert the previously configured/determined values `max_abs_force` and
-   `noise_level` automatically into the new unit.
+   number, without unit). The load can point in either sensor direction;
+   the resulting `force_calibration` remains positive. Once the command is
+   complete, review `max_abs_force` in grams and execute `SAVE_CONFIG` to
+   restart with the new ADC limit. The command updates `noise_level` but
+   does not rewrite `max_abs_force`.
 6. Make sure that the chosen `max_abs_force` can actually be measured with the
    found calibration. This is the case if the maximum possible raw ADC reading
    (usually 1.0) multiplied with the just determined `force_calibration` value

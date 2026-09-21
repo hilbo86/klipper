@@ -1,7 +1,8 @@
 import math
 import unittest
 
-from klippy.extras.extrusion_force_calibration import estimate_response_tau
+from klippy.extras.extrusion_force_calibration import (
+    ExtrusionForceCalibration, estimate_response_tau)
 from klippy.extras.extruder_force_current import (
     select_run_current, validate_current_curve)
 from klippy.extras.extrusion_force_guard import (
@@ -89,6 +90,45 @@ class FilterAndBaselineTest(unittest.TestCase):
         self.assertEqual(states[-1]["motion_state"], EXTRUSION_STEADY)
         self.assertEqual(states[-1]["expected_force_g"], 200.0)
         self.assertIsNotNone(states[-1]["excess_force_g"])
+
+    def test_operation_owner_is_published_and_released(self):
+        class Printer:
+            command_error = ValueError
+
+            def __init__(self):
+                self.events = []
+
+            def send_event(self, name, owner):
+                self.events.append((name, owner))
+
+        monitor = object.__new__(ExtrusionForceMonitor)
+        monitor.printer = Printer()
+        monitor.operation_owner = None
+        monitor.claim_operation("FORCE_FLOW_CALIBRATE")
+        self.assertEqual(monitor.get_active_operation(),
+                         "FORCE_FLOW_CALIBRATE")
+        with self.assertRaises(ValueError):
+            monitor.claim_operation("PRESSURE_PRIME")
+        monitor.release_operation("FORCE_FLOW_CALIBRATE")
+        self.assertIsNone(monitor.get_active_operation())
+        self.assertEqual(monitor.printer.events[-1],
+                         ("extrusion_force:operation_changed", None))
+
+    def test_flow_limit_uses_independent_operational_force(self):
+        class Profile:
+            flow_safety_factor = 0.8
+
+        calibration = object.__new__(ExtrusionForceCalibration)
+        calibration.minimum_knee_slope_ratio = 2.0
+        calibration.minimum_knee_fit_improvement = 0.25
+        points = [{"temperature": 220.0, "flow": flow,
+                   "mean_force": force}
+                  for flow, force in ((1.0, 100.0), (2.0, 400.0),
+                                      (3.0, 700.0))]
+        low, _, _ = calibration._flow_limits(points, Profile(), 500.0)
+        high, _, _ = calibration._flow_limits(points, Profile(), 800.0)
+        self.assertEqual(low[220.0], 2.0)
+        self.assertEqual(high[220.0], 3.0)
 
 
 class ProfileTest(unittest.TestCase):

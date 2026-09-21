@@ -514,11 +514,18 @@ class ExtrusionForceMonitor:
             raise self.printer.command_error(
                 "Load-cell operation already active: %s"
                 % (self.operation_owner,))
+        if self.operation_owner == owner:
+            return
         self.operation_owner = owner
+        self.printer.send_event("extrusion_force:operation_changed", owner)
 
     def release_operation(self, owner):
         if self.operation_owner == owner:
             self.operation_owner = None
+            self.printer.send_event("extrusion_force:operation_changed", None)
+
+    def get_active_operation(self):
+        return self.operation_owner
 
     def get_status(self, eventtime):
         if self.latest is None:
@@ -537,6 +544,8 @@ class ExtrusionForceMonitor:
                 "noise_g": 0.0,
                 "confidence": 0.0,
                 "operation": self.operation_owner,
+                "operation_active": self.operation_owner is not None,
+                "operation_owner": self.operation_owner,
             }
         state = self.latest
         return {
@@ -554,6 +563,8 @@ class ExtrusionForceMonitor:
             "noise_g": state["noise_g"],
             "confidence": state["confidence"],
             "operation": self.operation_owner,
+            "operation_active": self.operation_owner is not None,
+            "operation_owner": self.operation_owner,
         }
 
 

@@ -47,7 +47,10 @@ class ExtrusionForceCalibration:
         self.purge_flow = config.getfloat(
             "purge_flow", 2.0, above=0.0)
         self.abort_force = config.getfloat(
-            "abort_force", None, above=0.0)
+            "calibration_abort_force",
+            config.getfloat("abort_force", None, above=0.0), above=0.0)
+        self.operational_force_limit = config.getfloat(
+            "operational_force_limit", None, above=0.0)
         self.abort_force_rate = config.getfloat(
             "abort_force_rate", None, above=0.0)
         self.minimum_knee_slope_ratio = config.getfloat(
@@ -189,7 +192,7 @@ class ExtrusionForceCalibration:
             "sample_count": len(steady),
         }
 
-    def _flow_limits(self, points, profile, abort_force):
+    def _flow_limits(self, points, profile, operational_force_limit):
         limits = {}
         physical_limits = {}
         lower_bounds = set()
@@ -209,7 +212,8 @@ class ExtrusionForceCalibration:
             else:
                 physical_limits[temperature] = curve[-1]["flow"]
                 lower_bounds.add(temperature)
-            force_limit = abort_force * profile.flow_safety_factor
+            force_limit = (operational_force_limit
+                           * profile.flow_safety_factor)
             for point in curve:
                 if point["mean_force"] >= force_limit:
                     candidates.append(point["flow"])
@@ -243,6 +247,13 @@ class ExtrusionForceCalibration:
             if abort_force is None:
                 raise gcmd.error(
                     "ABORT_FORCE or calibration abort_force must be specified")
+            operational_force_limit = gcmd.get_float(
+                "OPERATIONAL_FORCE_LIMIT", self.operational_force_limit,
+                above=0.0)
+            if operational_force_limit is None:
+                raise gcmd.error("Set operational_force_limit or "
+                                 "OPERATIONAL_FORCE_LIMIT independently "
+                                 "of the calibration abort force")
             self._active_abort_force = abort_force
             self.safety_error = None
             points = []
@@ -284,7 +295,7 @@ class ExtrusionForceCalibration:
                         % (temperature, flow, point["mean_force"],
                            point["force_sigma"], point["sample_count"]))
             limits, physical_limits, lower_bounds = self._flow_limits(
-                points, profile, abort_force)
+                points, profile, operational_force_limit)
             profile.replace_calibration(
                 points, limits,
                 physical_flow_limits=physical_limits,

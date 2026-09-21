@@ -1366,7 +1366,9 @@ samples (defaults to 50).
 `LCP_CALIB_WEIGHT WEIGHT=<weight> [SAMPLES=<n>]`: Only used for the initial
 calibration. Determine the `force_calibration` configuration parameter. `WEIGHT`
 is specified in grams and the resulting calibration uses grams per ADC unit.
-The optional number of samples is used for averaging (defaults to 10).
+The result is positive for either direction of the applied load;
+`sensor_orientation` alone determines the reported sign. The optional number
+of samples is used for averaging (defaults to 10).
 
 #### LCP_CALIB_STIFFNESS
 `LCP_CALIB_STIFFNESS [SAMPLES=<n>]`: Only used for the initial calibration.
@@ -1409,10 +1411,12 @@ referenced filament profile and applies the profile's optional
 `FORCE_FLOW_CALIBRATE PROFILE=<name> [EXTRUDER=<name>]
 TEMPERATURES=<t1,t2,...> FLOW_START=<flow> FLOW_STEP=<flow>
 FLOW_MAX=<flow> [SETTLE_TIME=<seconds>] [MEASURE_TIME=<seconds>]
-[ABORT_FORCE=<grams>]`: Record steady-state force curves and stage their
+[ABORT_FORCE=<grams>] [OPERATIONAL_FORCE_LIMIT=<grams>]`:
+Record steady-state force curves and stage their
 profile data for `SAVE_CONFIG`. The nozzle must be homed, clear of the bed,
-hot enough to extrude, and protected by a configured force ceiling. `EXTRUDER`
-is required when the profile is configured for multiple extruders.
+hot enough to extrude, and protected by a configured calibration abort ceiling.
+The independent operational force limit bounds recommended sustained flow.
+`EXTRUDER` is required when the profile is configured for multiple extruders.
 
 #### FORCE_RESPONSE_CALIBRATE
 `FORCE_RESPONSE_CALIBRATE PROFILE=<name> [EXTRUDER=<name>]

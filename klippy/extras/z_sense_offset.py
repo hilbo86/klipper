@@ -141,6 +141,12 @@ class SensingZOffset:
                 self.calibration_samples.append(state)
                 if abs(state["force_fast_g"]) >= abort_force:
                     self.calibration_error = "ABORT_FORCE exceeded"
+        if (self.monitor is not None
+                and self.monitor.get_active_operation() is not None):
+            self.averaged_force = 0.0
+            self.i_average = 0.0
+            self.mode = "SUSPENDED"
+            return
         if not self.enable:
             return
         if state["motion_state"] != "EXTRUSION_STEADY":

@@ -120,6 +120,7 @@ class ExtrusionForceDiagnostics:
 
     def _handle_state(self, state):
         if (self.collision_detector is not None
+                and self.monitor.get_active_operation() is None
                 and self.collision_detector.update(state)):
             self.collision_count += 1
             self.last_collision = state["print_time"]

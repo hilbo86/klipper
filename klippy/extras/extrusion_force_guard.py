@@ -208,6 +208,8 @@ class ExtrusionForceGuard:
         self.jams = 0
         self.fault_pending = False
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
+        self.printer.register_event_handler(
+            "extrusion_force:operation_changed", self._operation_changed)
         self.gcode.register_command(
             "SET_EXTRUSION_FORCE_GUARD", self.cmd_SET_GUARD,
             desc="Enable or disable extrusion force fault detection")
@@ -233,6 +235,12 @@ class ExtrusionForceGuard:
     def _handle_state(self, state):
         if self.logic is None:
             return
+        if self.monitor.get_active_operation() is not None:
+            self._operation_changed(self.monitor.get_active_operation())
+            return
+        if self.logic.state == "SUSPENDED":
+            self.logic.state = "IDLE"
+            self.logic.last_time = None
         events, fault = self.logic.update(state)
         for event in events:
             self.printer.send_event("extrusion_force:%s" % (event,), state)
@@ -247,7 +255,21 @@ class ExtrusionForceGuard:
             self.reactor.register_callback(
                 lambda eventtime: self._handle_fault(eventtime, fault))
 
+    def _operation_changed(self, owner):
+        if self.logic is None:
+            return
+        self.logic._reset_suspects()
+        self.logic.last_e_position = None
+        self.logic.last_time = None
+        if owner is not None and self.logic.enabled:
+            self.logic.state = "SUSPENDED"
+        else:
+            self.logic.state = "IDLE" if self.logic.enabled else "DISABLED"
+
     def _handle_fault(self, eventtime, fault):
+        if self.monitor.get_active_operation() is not None:
+            self.fault_pending = False
+            return
         try:
             pause = ((fault == "DELIVERY_FAILURE"
                       and self.pause_on_delivery_failure)
@@ -279,6 +301,8 @@ class ExtrusionForceGuard:
                   else {"enabled": False, "state": "DISABLED",
                         "nozzle_health": None, "clog_score": None})
         status.update({
+            "operation_owner": (self.monitor.get_active_operation()
+                                if self.monitor is not None else None),
             "last_fault": self.last_fault,
             "last_fault_time": self.last_fault_time,
             "delivery_failures": self.delivery_failures,

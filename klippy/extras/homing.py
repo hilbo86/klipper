@@ -78,6 +78,15 @@ class HomingMove:
                     triggered=True, check_triggered=True):
         # Notify start of homing/probing move
         self.printer.send_event("homing:homing_move_begin", self)
+        guard = self.printer.lookup_object("load_cell_homing_guard", None)
+        try:
+            guard_active = (guard.prepare_move(movepos, probe_pos)
+                            if guard is not None else False)
+        except Exception:
+            if guard is not None and guard.axis is not None:
+                self.toolhead.get_kinematics().clear_homing_state(guard.axis)
+            self.printer.send_event("homing:homing_move_end", self)
+            raise
         # Note start location
         self.toolhead.flush_step_generation()
         kin = self.toolhead.get_kinematics()
@@ -97,6 +106,11 @@ class HomingMove:
             endstop_triggers.append(wait)
         all_endstop_trigger = multi_complete(self.printer, endstop_triggers)
         self.toolhead.dwell(HOMING_START_DELAY)
+        if guard_active:
+            guard_completion = guard.start_move(self.toolhead.get_last_move_time())
+            if guard_completion is not None:
+                all_endstop_trigger = multi_complete(
+                    self.printer, [all_endstop_trigger, guard_completion])
         # Issue move
         error = None
         try:
@@ -122,6 +136,51 @@ class HomingMove:
         for sp in self.stepper_positions:
             tt = trigger_times.get(sp.endstop_name, move_end_print_time)
             sp.note_home_end(tt)
+        if (guard_active and guard.collision is not None
+                and guard.mode == "abort"):
+            # The drip queue has stopped and been wiped. Recover the actual
+            # halt position from the stepper counters before any backoff.
+            retracted = False
+            try:
+                halt_steps = {sp.stepper_name: sp.halt_pos - sp.start_pos
+                              for sp in self.stepper_positions}
+                haltpos = self.calc_toolhead_pos(kin_spos, halt_steps)
+                self.toolhead.set_position(haltpos)
+                if guard.collision_retract and not self.printer.is_shutdown():
+                    retractpos = list(haltpos)
+                    for axis in range(3):
+                        retractpos[axis] -= (guard.motion_vector[axis]
+                                             * guard.retract_distance)
+                    try:
+                        self.toolhead.move(retractpos, guard.retract_speed)
+                        self.toolhead.wait_moves()
+                        retracted = True
+                    except self.printer.command_error:
+                        logging.exception("Load cell collision retract failed")
+            finally:
+                kin.clear_homing_state(guard.axis)
+                try:
+                    self.printer.send_event(
+                        "load_cell_homing:collision", guard.collision)
+                    if retracted:
+                        self.printer.send_event(
+                            "load_cell_homing:retracted", guard.collision)
+                except Exception:
+                    logging.exception("Load cell collision event failed")
+                finally:
+                    try:
+                        guard.finish_move(was_collision=True)
+                    finally:
+                        try:
+                            self.printer.send_event(
+                                "homing:homing_move_end", self)
+                        except self.printer.command_error:
+                            logging.exception(
+                                "Homing cleanup after collision failed")
+            raise self.printer.command_error(
+                "Load cell collision during %s homing" % (guard.axis,))
+        if guard_active:
+            guard.finish_move()
         if probe_pos:
             halt_steps = {sp.stepper_name: sp.halt_pos - sp.start_pos
                           for sp in self.stepper_positions}

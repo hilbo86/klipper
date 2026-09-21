@@ -86,6 +86,9 @@ class FakeConfig:
     def get_name(self):
         return "load_cell_probe_renkforce"
 
+    def error(self, message):
+        return ValueError(message)
+
     def get(self, name, default=None):
         return self.values.get(name, default)
 
@@ -103,6 +106,14 @@ class FakeConfig:
 
 
 class LoadCellSampleApiTest(unittest.TestCase):
+    def test_nonpositive_force_calibration_is_rejected(self):
+        for value in (-2.0, 0.0):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError,
+                                            "force_calibration must be"):
+                    load_cell_probe_renkforce.LoadCellProbe(
+                        FakeConfig(force_calibration=value))
+
     def test_current_mcu_adc_class_connects_and_delivers_samples(self):
         # Load the real, standalone ADC class without importing the serial/C
         # transport dependencies. This also runs on Windows and prevents our
@@ -188,6 +199,33 @@ class LoadCellSampleApiTest(unittest.TestCase):
         self.assertFalse(status["is_calibrated"])
         self.assertIsNone(status["force_g"])
         self.assertEqual(status["last_force"], 0.0)
+
+    def test_weight_calibration_keeps_positive_scale_for_both_directions(self):
+        class Gcmd:
+            def get_int(self, name, default=None, **kwargs):
+                return 2
+
+            def get_float(self, name, default=None, **kwargs):
+                return 100.0
+
+            def respond_info(self, message):
+                pass
+
+            def error(self, message):
+                return ValueError(message)
+
+        for orientation in ("normal", "inverted"):
+            for delta in (-10.0, 10.0):
+                with self.subTest(orientation=orientation, delta=delta):
+                    sensor = load_cell_probe_renkforce.LoadCellProbe(
+                        FakeConfig(force_calibration=2.0,
+                                   orientation=orientation))
+                    sensor._force_offset = 0.0
+                    sensor._read_uncompensated_force = lambda gcmd: delta
+                    sensor.cmd_LCP_CALIB_WEIGHT(Gcmd())
+                    self.assertEqual(sensor._force_calibration, 20.0)
+                    self.assertEqual(sensor._orientation,
+                                     -1.0 if orientation == "inverted" else 1.0)
 
     def test_timestamped_samples_orientation_and_rolling_status(self):
         sensor = load_cell_probe_renkforce.LoadCellProbe(
