@@ -107,7 +107,8 @@ class HomingMove:
         all_endstop_trigger = multi_complete(self.printer, endstop_triggers)
         self.toolhead.dwell(HOMING_START_DELAY)
         if guard_active:
-            guard_completion = guard.start_move(self.toolhead.get_last_move_time())
+            guard_completion = guard.start_move(
+                self.toolhead.get_last_move_time())
             if guard_completion is not None:
                 all_endstop_trigger = multi_complete(
                     self.printer, [all_endstop_trigger, guard_completion])

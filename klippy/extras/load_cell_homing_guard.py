@@ -103,8 +103,9 @@ class LoadCellHomingGuard:
         self.axis_forces = {
             axis: config.getfloat("collision_force_" + axis, None, above=0.0)
             for axis in "xyz"}
+        thresholds = [self.minimum_force] + list(self.axis_forces.values())
         if any(value is not None and not math.isfinite(value)
-               for value in [self.minimum_force] + list(self.axis_forces.values())):
+               for value in thresholds):
             raise config.error("Homing collision thresholds must be finite")
         self.noise_factor = config.getfloat("noise_factor", 8.0, above=0.0)
         self.relative_baseline_factor = config.getfloat(
@@ -254,7 +255,8 @@ class LoadCellHomingGuard:
         self.completion = None
         self.move_start_time = None
         self.state = "FAULT" if was_collision else "DISABLED"
-        self.printer.send_event("load_cell_homing:finished", self.get_status(0.0))
+        self.printer.send_event(
+            "load_cell_homing:finished", self.get_status(0.0))
 
     def get_status(self, eventtime):
         detector = self.detector
