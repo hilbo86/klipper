@@ -150,6 +150,10 @@ class ExtrusionForcePriming:
             "baseline_samples", 10, minval=2)
         self.sample_timeout = config.getfloat(
             "sample_timeout", 2.0, above=0.0)
+        self.heat_wait_tolerance = config.getfloat(
+            "heat_wait_tolerance", 2.0, minval=0.0)
+        self.heat_wait_timeout = config.getfloat(
+            "heat_wait_timeout", 600.0, above=0.0)
         self.monitor_name = config.get(
             "monitor", "extrusion_force_monitor")
         self.load_cell = self.printer.lookup_object("load_cell")
@@ -207,6 +211,25 @@ class ExtrusionForcePriming:
             self.reactor.pause(self.reactor.monotonic() + 0.02)
         self.baseline_force = statistics.mean(
             self.baseline_values[-self.baseline_samples:])
+
+    def _wait_for_heat(self, gcmd, heater, target_temp):
+        minimum = max(heater.min_extrude_temp,
+                      target_temp - self.heat_wait_tolerance)
+        deadline = self.reactor.monotonic() + self.heat_wait_timeout
+        while True:
+            now = self.reactor.monotonic()
+            if self.printer.is_shutdown():
+                raise gcmd.error("Printer shutdown while heating for priming")
+            temperature, target = heater.get_temp(now)
+            if target < minimum:
+                raise gcmd.error("Prime heater target changed while heating")
+            if temperature >= minimum:
+                return
+            if now >= deadline:
+                raise gcmd.error(
+                    "Timeout heating for pressure prime: %.1fC below %.1fC"
+                    % (temperature, minimum))
+            self.reactor.pause(min(now + 0.5, deadline))
 
     def _extrude_segment(self, gcmd, speed, length=1.0):
         start_time = self.tool.get_last_move_time()
@@ -278,7 +301,8 @@ class ExtrusionForcePriming:
                 self.gcode.run_script_from_command(
                     "ACTIVATE_EXTRUDER EXTRUDER=%s" % (extruder_name,))
             heaters = self.printer.lookup_object("heaters")
-            heaters.set_temperature(extruder.get_heater(), target_temp, True)
+            heaters.set_temperature(extruder.get_heater(), target_temp, False)
+            self._wait_for_heat(gcmd, extruder.get_heater(), target_temp)
             self.tool.wait_moves()
             self.thermal.capture_baseline(
                 gcmd, extruder.get_heater(), target_temp)

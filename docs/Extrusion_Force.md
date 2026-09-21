@@ -199,18 +199,25 @@ with a sustained increase in heater power over idle demand. This prevents
 friction from filament that has not yet reached the melt zone from being enough
 to report successful priming.
 
-After heating to `TARGET_TEMP`, priming records a stable idle temperature and
-mean heater power before feeding. During priming it samples power every 100 ms
-and compares a rolling mean, including short measurement pauses, with that
-baseline. Including pauses accommodates the heater's delayed response to cold
-filament. Temperature must stay near the same target, and the power increase
-must exceed both the configured minimum and three times idle power noise in
-both halves of the observation window, so one PWM peak is insufficient.
+`PRESSURE_PRIME` sets the heater target without Klipper's PID settle wait. It
+continues when the temperature first reaches the greater of the extruder's
+minimum extrusion temperature and `TARGET_TEMP - heat_wait_tolerance`. This
+wait has a timeout. Priming then attempts to record a stable idle temperature
+and mean heater power before feeding. During priming it samples power every
+100 ms and compares a rolling mean, including short measurement pauses, with
+that baseline. Including pauses accommodates the heater's delayed response
+to cold filament. The temperature must stay near the target. In both halves
+of the observation window, the power increase must exceed the configured
+minimum and three times idle power noise, so one PWM peak is insufficient.
 The command reports idle power and the required increase for tuning.
 
 Additional optional `[extrusion_force_priming]` settings (defaults shown):
 
 ```ini
+heat_wait_tolerance: 2.0
+# How far below TARGET_TEMP priming may begin, in degrees C.
+heat_wait_timeout: 600.0
+# Maximum wait for the minimum priming temperature, in seconds.
 thermal_baseline_time: 5.0
 # Stable idle observation duration, in seconds.
 thermal_settle_timeout: 30.0

@@ -126,6 +126,9 @@ class FakePrinter:
             return self.heaters
         return default
 
+    def is_shutdown(self):
+        return False
+
 
 class FakeGCode:
     def __init__(self):
@@ -189,6 +192,9 @@ def make_priming(times=None):
     priming.baseline_force = None
     priming.overpressure = False
     priming.active_force_limit = None
+    priming.heat_wait_tolerance = 2.0
+    priming.heat_wait_timeout = 600.0
+    priming._wait_for_heat = lambda gcmd, heater, target: None
     priming._capture_baseline = lambda gcmd: setattr(
         priming, "baseline_force", 0.0)
     return priming
@@ -221,7 +227,7 @@ class ExtrusionForcePrimingTest(unittest.TestCase):
         self.assertEqual(priming.force_safety_limit, 3000.0)
         self.assertEqual(
             priming.heaters.calls,
-            [(priming.extruder.heater, 210.0, True),
+            [(priming.extruder.heater, 210.0, False),
              (priming.extruder.heater, 180.0, False)])
         self.assertIn("SUCCESS after 3mm", gcmd.messages[-1])
         self.assertIn("Nr   3", gcmd.messages[-1])
@@ -362,6 +368,34 @@ class ThermalHeater:
     def get_status(self, time):
         temp, power, target = self.status(time)
         return {"temperature": temp, "power": power, "target": target}
+
+    def get_temp(self, time):
+        temp, _, target = self.status(time)
+        return temp, target
+
+
+class PrimingHeatWaitTest(unittest.TestCase):
+    def make_priming(self, status, timeout=10.0):
+        priming = object.__new__(ExtrusionForcePriming)
+        priming.reactor = ThermalClock()
+        priming.printer = FakePrinter(FakeHeaters())
+        priming.heat_wait_tolerance = 2.0
+        priming.heat_wait_timeout = timeout
+        heater = ThermalHeater(status)
+        heater.min_extrude_temp = 170.0
+        return priming, heater
+
+    def test_accepts_first_safe_temperature_crossing(self):
+        priming, heater = self.make_priming(
+            lambda time: (207.5 if time < 0.5 else 208.1, 0.2, 210.0))
+        priming._wait_for_heat(FakeGCmd(), heater, 210.0)
+        self.assertEqual(priming.reactor.monotonic(), 0.5)
+
+    def test_unreached_minimum_times_out(self):
+        priming, heater = self.make_priming(
+            lambda time: (207.0, 0.7, 210.0), timeout=1.0)
+        with self.assertRaisesRegex(CommandError, "Timeout heating"):
+            priming._wait_for_heat(FakeGCmd(), heater, 210.0)
 
 
 class PrimingThermalEvidenceTest(unittest.TestCase):
