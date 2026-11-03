@@ -829,6 +829,19 @@ above the supplied MINIMUM and/or at or below the supplied MAXIMUM.
 [TARGET=<target_temperature>]`: Sets the target temperature for a
 heater. If a target temperature is not supplied, the target is 0.
 
+### I2C diagnostics
+
+#### `I2C_ERRORS`
+
+`I2C_ERRORS`: Report failed I2C transfers over the last hour and since Klippy
+start, grouped by client, MCU, bus, OID, address, and error status. Locally
+suppressed requests during a tolerant client's cooldown are listed separately.
+The command is available automatically when an I2C client is configured. See
+[I2C fault tolerance](I2C_Fault_Tolerance.md) for coverage and firmware support.
+The first error also appears automatically on the G-Code console; subsequent
+notifications are limited to one per minute per client, with every reported
+error still counted.
+
 ### [idle_timeout]
 
 The idle_timeout module is automatically loaded.

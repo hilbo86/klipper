@@ -54,6 +54,16 @@ config HAVE_SAM_CANBUS
     bool
     default y if MACH_SAME70
 
+config ATSAM_I2C_RECOVERY
+    bool "Enable bounded I2C bus recovery" if LOW_LEVEL_OPTIONS
+    depends on MACH_SAM3X && WANT_I2C
+    default n
+    help
+        Recover the TWI controller and attempt an open-drain bus clear after
+        an I2C error. Interrupts remain enabled and recovery is time limited.
+        Requires host-side opt-in for supported noncritical I2C clients;
+        other clients retain their normal shutdown behavior.
+
 config MCU
     string
     default "sam3x8e" if MACH_SAM3X8E

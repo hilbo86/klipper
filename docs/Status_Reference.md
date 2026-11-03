@@ -10,6 +10,31 @@ attribute be sure to review the
 [Config Changes document](Config_Changes.md) when upgrading the
 Klipper software.
 
+## ads1x1x
+
+The following information is available in `ads1x1x <name>` objects:
+
+- `channels`: A dictionary keyed by ADC pin, with `last_sample_age` in seconds
+  (`None` before the first successful sample) and `invalid_count`. Tolerated
+  I2C errors leave the last sample unchanged and do not change `invalid_count`.
+
+## i2c_stats
+
+This object is loaded automatically for configured I2C clients:
+
+- `errors_last_hour`, `errors_total`: Failed transfers in a rolling hour and
+  since Klippy start. The hour uses one-second buckets; a failure can expire
+  up to one second early. Restarting Klippy resets the counters.
+- `window_seconds`, `resolution_seconds`: 3600 and 1, respectively.
+- `clients`: Dictionary keyed by `mcu_name:oid`. Each entry contains `name`,
+  `mcu`, `bus`, `oid`, `address`, `errors_last_hour`, `errors_total`,
+  `by_status_last_hour`, `last_error`, `last_error_time` (monotonic host time),
+  and `skipped_total` (locally suppressed requests, not additional bus errors).
+
+`I2C_ERRORS` prints these diagnostics. See
+[I2C fault tolerance](I2C_Fault_Tolerance.md) for supported firmware, client
+policy, and which operations supply error reports.
+
 ## angle
 
 The following information is available in

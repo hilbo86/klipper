@@ -6035,6 +6035,13 @@ i2c_bus: i2c.1
 #   Default value is GND.  There can be up to four addressed devices depending
 #   upon wiring of the device. Check the datasheet for details. The i2c_address
 #   can be specified directly instead of using the address_pin.
+#i2c_error_tolerant: False
+#   Skip failed I2C samples and retry on a later sampling cycle. Only for
+#   noncritical monitoring. Requires SAM3X hardware I2C firmware built with
+#   CONFIG_ATSAM_I2C_RECOVERY=y. The last value is retained without a new
+#   callback; valid out-of-range readings retain their usual protection.
+#   Errors are available through I2C_ERRORS and the i2c_stats status object.
+#   The default is False. See I2C_Fault_Tolerance.md for build and timing details.
 ```
 
 The chip provides pins that can be used on other sensors.

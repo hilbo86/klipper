@@ -157,16 +157,26 @@ def MCU_SPI_from_config(config, mode, pin_option="cs_pin",
 # I2C
 ######################################################################
 
+class I2CError(Exception):
+    """A failed noncritical transfer; callers must discard the operation."""
+
+
+I2C_RETRY_DELAY = 1.
+
 # Helper code for working with devices connected to an MCU via an I2C bus
 class MCU_I2C:
     def __init__(self, mcu, bus, addr, speed, sw_pins=None,
-                 async_write_only=False):
+                 async_write_only=False, error_tolerant=False):
         self.mcu = mcu
         self.bus = bus
         self.i2c_address = addr
         self.oid = self.mcu.create_oid()
         self.speed = speed
         self.async_write_only = async_write_only
+        self.error_tolerant = error_tolerant
+        self._software_bus = sw_pins is not None
+        self._error_stats = None
+        self._retry_after = 0.
         self.config_fmt_ticks = None
         mcu.add_config_cmd("config_i2c oid=%d" % (self.oid,))
         # Generate I2C bus config message
@@ -208,13 +218,31 @@ class MCU_I2C:
         status = params["i2c_bus_status"]
         if status == "SUCCESS":
             return
+        if self._error_stats is not None:
+            # Serial callbacks run on the receive thread. Keep all rolling
+            # statistics on the reactor thread, including bucket expiry.
+            reactor = self.mcu.get_printer().get_reactor()
+            reactor.register_async_callback(
+                lambda eventtime: self._error_stats.note_error(self, status))
+            return
         err_msg = "MCU '%s' I2C request to addr %i reports error %s" % (
             self.mcu.get_name(), self.i2c_address, status)
         logging.error(err_msg)
     def build_config(self):
         if '%' in self.config_fmt:
             bus = resolve_bus_name(self.mcu, "i2c_bus", self.bus)
+            self.bus = bus
             self.config_fmt = self.config_fmt % (bus,)
+        if self.error_tolerant:
+            if (self._software_bus
+                or not self.mcu.get_constants().get('I2C_BUS_RECOVERY', 0)
+                or self.mcu.try_lookup_command(
+                    "i2c_read oid=%c reg=%*s read_len=%u")):
+                raise mcu.error(
+                    "Tolerant I2C requires SAM3X hardware I2C firmware built"
+                    " with CONFIG_ATSAM_I2C_RECOVERY=y")
+            if self.async_write_only:
+                raise mcu.error("Tolerant I2C requires acknowledged transfers")
         if self.config_fmt_ticks:
             if self.mcu.try_lookup_command("i2c_set_sw_bus oid=%c"
                                            " scl_pin=%u sda_pin=%u"
@@ -254,6 +282,8 @@ class MCU_I2C:
                     self.oid)
         self._configured = True
     def i2c_write_noack(self, data, minclock=0, reqclock=0):
+        if self.error_tolerant:
+            return self.i2c_write(data, minclock=minclock, reqclock=reqclock)
         if self.async_write_only:
             self.i2c_write_only_cmd.send([self.oid, data, 0],
                                          minclock=minclock, reqclock=reqclock)
@@ -290,17 +320,33 @@ class MCU_I2C:
             cmd.send([self.oid, write, read_len],
                      minclock=minclock, reqclock=reqclock)
             return
+        if self.error_tolerant:
+            eventtime = self.mcu.get_printer().get_reactor().monotonic()
+            if eventtime < self._retry_after:
+                if self._error_stats is not None:
+                    self._error_stats.note_skip(self)
+                raise I2CError("I2C client is waiting before its next attempt")
         param = cmd.send([self.oid, write, read_len],
                          minclock=minclock, reqclock=reqclock, retry=retry)
         status = param["i2c_bus_status"]
+        if status == "SUCCESS" and len(param['response']) != read_len:
+            status = "INVALID_RESPONSE"
         if status == "SUCCESS":
+            self._retry_after = 0.
             return param
         err_msg = "MCU '%s' I2C request to addr %i reports error %s" % (
             self.mcu.get_name(), self.i2c_address, status)
+        if self._error_stats is not None:
+            self._error_stats.note_error(self, status)
+        if self.error_tolerant:
+            self._retry_after = (
+                self.mcu.get_printer().get_reactor().monotonic()
+                + I2C_RETRY_DELAY)
+            raise I2CError(err_msg)
         self.mcu.get_printer().invoke_shutdown(err_msg)
 
 def MCU_I2C_from_config(config, default_addr=None, default_speed=100000,
-                        async_write_only=False):
+                        async_write_only=False, error_tolerant=False):
     # Load bus parameters
     printer = config.get_printer()
     i2c_mcu = mcu.get_printer_mcu(printer, config.get('i2c_mcu', 'mcu'))
@@ -326,7 +372,11 @@ def MCU_I2C_from_config(config, default_addr=None, default_speed=100000,
         bus = config.get('i2c_bus', None)
         sw_pins = None
     # Create MCU_I2C object
-    return MCU_I2C(i2c_mcu, bus, addr, speed, sw_pins, async_write_only)
+    client = MCU_I2C(i2c_mcu, bus, addr, speed, sw_pins, async_write_only,
+                     error_tolerant=error_tolerant)
+    client._error_stats = printer.load_object(config, 'i2c_stats')
+    client._error_stats.register_client(client, config.get_name())
+    return client
 
 
 ######################################################################

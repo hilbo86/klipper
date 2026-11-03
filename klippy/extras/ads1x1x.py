@@ -167,6 +167,9 @@ ADS1X1_OPERATIONS = {
     'READ_CONVERSION': 1
 }
 
+# A tolerated bus error is a missing observation, not an ADC range violation.
+I2C_SAMPLE_ERROR = object()
+
 class ADS1X1X_chip:
 
     def __init__(self, config):
@@ -192,7 +195,9 @@ class ADS1X1X_chip:
         self.comp_polarity = ADS1X1X_COMPARATOR_POLARITY['ACTIVE_LO']
         self.comp_latching = ADS1X1X_COMPARATOR_LATCHING['NON_LATCHING']
         self.comp_queue = ADS1X1X_COMPARATOR_QUEUE['QUEUE_NONE']
-        self._i2c = bus.MCU_I2C_from_config(config, address)
+        self._i2c = bus.MCU_I2C_from_config(
+            config, address,
+            error_tolerant=config.getboolean('i2c_error_tolerant', False))
 
         self.mcu = self._i2c.get_mcu()
 
@@ -246,8 +251,19 @@ class ADS1X1X_chip:
         try:
             # Init all devices on bus for this kind of device
             self._i2c.i2c_write([0x06, 0x00, 0x00])
+        except bus.I2CError:
+            # The bus already records and rate limits tolerated errors.
+            pass
         except Exception:
             logging.exception("ADS1X1X: error while resetting device")
+
+    def get_status(self, eventtime):
+        return {'channels': {
+            name: {
+                'last_sample_age': (None if pin.last_sample_time is None else
+                                    max(0., eventtime - pin.last_sample_time)),
+                'invalid_count': pin.invalid_count,
+            } for name, pin in self._pins.items()}}
 
     def is_ready(self):
         cfg = self._read_register(ADS1X1X_REG_POINTER['CONFIG'])
@@ -299,6 +315,8 @@ class ADS1X1X_chip:
                         logging.warning("ADS1X1X: timeout during sampling")
                         return None
                 return self._read_register(ADS1X1X_REG_POINTER['CONVERSION'])
+            except bus.I2CError:
+                return I2C_SAMPLE_ERROR
             except Exception as e:
                 logging.exception("ADS1X1X: error while sampling: %s" % str(e))
                 return None
@@ -323,6 +341,7 @@ class ADS1X1X_pin:
         self.chip = chip
         self.pcfg = pcfg
         self._last_state = (0., 0.)
+        self.last_sample_time = None
         self.invalid_count = 0
 
         self.chip._printer.register_event_handler("klippy:connect", \
@@ -336,6 +355,10 @@ class ADS1X1X_pin:
 
     def _process_sample(self, eventtime):
         sample = self.chip.sample(self)
+        if sample is I2C_SAMPLE_ERROR:
+            # Keep the last value and existing range violations untouched.
+            # A later report starts a fresh conversion and can recover.
+            return eventtime + self.report_time
         if sample is not None:
             # The sample is encoded in the top 12 or full 16 bits
             # Value's meaning is defined by ADS1X1X_REG_CONFIG['PGA_MASK']
@@ -364,6 +387,7 @@ class ADS1X1X_pin:
             systime = self._reactor.monotonic()
             measured_time = self.chip.mcu.estimated_print_time(systime)
             self._last_state = (measured_time, target_value)
+            self.last_sample_time = systime
             self.callback([(measured_time, target_value)])
         else:
             self.invalid_count = self.invalid_count + 1

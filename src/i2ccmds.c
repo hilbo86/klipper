@@ -101,6 +101,10 @@ void command_i2c_transfer(uint32_t *args)
         nack = i2c_dev_read(i2c, wlen, wdata, rlen, rdata);
     else
         nack = i2c_dev_write(i2c, wlen, wdata);
+    // A failed read may contain partial data or uninitialized stack bytes.
+    // Return only the status so that it cannot be consumed as a sample.
+    if (nack != I2C_BUS_SUCCESS)
+        rlen = 0;
     sendf("i2c_response oid=%c i2c_bus_status=%c response=%*s",
                         oid, nack, rlen, rdata);
 }
