@@ -25,6 +25,12 @@ MODEL = r'''
 #include <string.h>
 #include "dht.h"
 
+// Fail without invoking Windows' interactive CRT assertion / crash dialogs.
+#undef assert
+#define assert(expr) do { if (!(expr)) { \
+    fprintf(stderr,"line %d: %s\n",__LINE__,#expr); exit(3); \
+} } while (0)
+
 #define CONFIG_MACH_atmega328p 1
 #define CONFIG_CLOCK_FREQ 16000000
 #define CONFIG_HAVE_STEPPER 0
@@ -36,11 +42,42 @@ MODEL = r'''
 #define GPIO(p, n) (((p)-'A')*8+(n))
 #define container_of(p, t, m) ((t*)((char*)(p)-offsetof(t, m)))
 #define ISR(name) void name(void)
+#define barrier() __asm__ __volatile__("" ::: "memory")
 enum { PCINT5=5, PCIE0=0, PCIF0=0, INT0=0, INTF0=0,
        ISC00=0, ISC01=1, SPE=6 };
-static uint8_t PCMSK0, PCICR, PCIFR, EIMSK, EICRA, EIFR, SPCR;
+static uint8_t PCICR, PCIFR, EICRA, EIFR, SPCR;
+static uint8_t model_pcmsk0, model_eimsk;
 static uint8_t DDRB, DDRD, PORTB, PORTD, PINB, PIND;
-static uint16_t TCNT1;
+static struct dht_gpio *receiver;
+static unsigned inject_arm_rise;
+static uint8_t *irq_mask_register(uint8_t *reg) {
+    if (inject_arm_rise && receiver) {
+        PINB=PIND=0xff; inject_arm_rise=0;
+    }
+    return reg;
+}
+#define PCMSK0 (*irq_mask_register(&model_pcmsk0))
+#define EIMSK (*irq_mask_register(&model_eimsk))
+static uint16_t model_tcnt1;
+static unsigned inject_rise, inject_pin;
+static void rise_if_released(void) {
+    unsigned output=inject_pin==GPIO('B',5)
+        ? DDRB&(1<<5) : DDRD&(1<<2);
+    if (inject_rise==2 && !output) {
+        PINB=PIND=0xff; inject_rise=0;
+    }
+}
+static uint16_t *timer_register(void) {
+    rise_if_released(); return &model_tcnt1;
+}
+#define TCNT1 (*timer_register())
+static void *model_memset(void *data, int value, size_t size) {
+    void *result=memset(data,value,size);
+    // A pull-up edge while decode_start clears the receive buffer.
+    if (inject_rise==1) { inject_rise=2; rise_if_released(); }
+    return result;
+}
+#define memset model_memset
 struct timer { struct timer *next; uint_fast8_t (*func)(struct timer*);
                uint32_t waketime; };
 struct task_wake { uint8_t wake; };
@@ -50,6 +87,9 @@ static uint32_t now;
 static unsigned locked, reports, report_status, report_oid;
 static int report_temp, report_humidity;
 static uint32_t report_clock;
+static unsigned diagnostic_reports, diagnostic_present, diagnostic_state;
+static unsigned diagnostic_bits, diagnostic_ticks, diagnostic_level;
+static uint32_t diagnostic_clock;
 typedef unsigned irqstatus_t;
 static irqstatus_t irq_save(void) { unsigned old=locked; locked=1; return old; }
 static void irq_restore(irqstatus_t old) { locked=old; }
@@ -85,13 +125,23 @@ static int expect_shutdown;
 static const char *shutdown_reason;
 static void model_shutdown(const char *reason) {
     shutdown_reason=reason;
-    if (!expect_shutdown) { fprintf(stderr, "%s\n", reason); abort(); }
+    if (!expect_shutdown) { fprintf(stderr, "%s\n", reason); exit(3); }
     longjmp(failure, 1);
 }
 #define shutdown(msg) model_shutdown(msg)
 static void model_send(const char *format, ...) {
     assert(!locked);
     va_list args; va_start(args, format);
+    if (!strncmp(format,"dht_diagnostics ",16)) {
+        assert(va_arg(args, int)==object_oid);
+        diagnostic_clock=va_arg(args, uint32_t);
+        diagnostic_present=va_arg(args, int);
+        diagnostic_state=va_arg(args, int);
+        diagnostic_bits=va_arg(args, int);
+        diagnostic_ticks=va_arg(args, int);
+        diagnostic_level=va_arg(args, int);
+        diagnostic_reports++; va_end(args); return;
+    }
     report_oid=va_arg(args, int); report_clock=va_arg(args, uint32_t);
     report_status=va_arg(args, int); report_temp=va_arg(args, int);
     report_humidity=va_arg(args, int); va_end(args); reports++;
@@ -166,7 +216,9 @@ static void frame(const uint8_t *b, unsigned zero, unsigned one) {
 }
 static void checksum(uint8_t *b) { b[4]=b[0]+b[1]+b[2]+b[3]; }
 static void reset_model(void) {
+    inject_rise=inject_arm_rise=0;
     scheduled=NULL; now=TCNT1=0; locked=reports=0;
+    diagnostic_reports=0;
     object_count=object_oid=allocated=0; active_dht=NULL; receiver=NULL;
     dht_wake.wake=0;
     PINB=PIND=0xff; PCMSK0=PCICR=EIMSK=EICRA=SPCR=0;
@@ -273,10 +325,40 @@ int main(int argc, char **argv) {
         begin(DHT22,GPIO('D',2),0); edge(4,1);
         uint8_t b[]={2,146,1,13,162};
         preamble(); frame(b,27,70); dht_task(); assert(report_status==DHT_OK);
+    } else if (!strcmp(name,"release_rise_during_init")
+               || !strcmp(name,"release_rise_at_irq_enable")) {
+        for (unsigned pin=0;pin<2;pin++) {
+            reset_model();
+            inject_pin=pin ? GPIO('D',2) : GPIO('B',5);
+            configure(DHT11,inject_pin); query(5000000);
+            advance_ticks(scheduled->waketime-now);
+            PINB=PIND=0;
+            if (!strcmp(name,"release_rise_during_init")) inject_rise=1;
+            else inject_arm_rise=1;
+            advance_ticks(scheduled->waketime-now);
+            uint8_t b[]={23,0,22,0,45};
+            preamble(); frame(b,27,70); dht_task();
+            assert(reports==1 && report_status==DHT_OK);
+        }
     } else if (!strcmp(name,"bus_busy")) {
         configure(DHT11,GPIO('B',5)); PINB=0; query(5000000);
         advance_ticks(scheduled->waketime-now); dht_task(); released();
         assert(reports==1 && report_status==DHT_BUS_BUSY);
+    } else if (!strcmp(name,"pulse_diagnostics")) {
+        begin(DHT11,GPIO('B',5),1);
+        uint32_t args[]={7}; command_query_dht_diagnostics(args);
+        assert(diagnostic_reports==1 && !diagnostic_present);
+        uint32_t start=sensor()->start_clock;
+        preamble(); bit(0,27,70); edge(50,1); edge(5,0);
+        dht_task(); assert(report_status==DHT_PULSE_ERROR);
+        assert(diagnostic_reports==1); // No unsolicited debug messages.
+        command_query_dht_diagnostics(args);
+        assert(diagnostic_reports==2 && diagnostic_present);
+        assert(diagnostic_state==DHT_BIT_HIGH && diagnostic_bits==1);
+        assert(diagnostic_ticks==5*16 && diagnostic_level==0);
+        assert(diagnostic_clock==start && reports==1);
+        query(0); command_query_dht_diagnostics(args);
+        assert(diagnostic_present && diagnostic_clock==start);
     } else if (!strcmp(name,"lifecycle")) {
         for (unsigned action=0;action<3;action++)
         for (unsigned stage=0;stage<9;stage++) {
@@ -410,7 +492,9 @@ class TestDHTFirmware(unittest.TestCase):
         for scenario in ('formats', 'patterns', 'threshold_jitter',
                          'bad_frames', 'timeouts', 'long_gap_alias',
                          'bad_edges', 'lost_edges',
-                         'release_edge', 'bus_busy', 'lifecycle', 'wrap32',
+                         'release_edge', 'release_rise_during_init',
+                         'release_rise_at_irq_enable',
+                         'bus_busy', 'pulse_diagnostics', 'lifecycle', 'wrap32',
                          'pending_race', 'preserve_registers', 'pcint_filter',
                          'restart_long_idle', 'pullup', 'config_errors'):
             with self.subTest(scenario=scenario):

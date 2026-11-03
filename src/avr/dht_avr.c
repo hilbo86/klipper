@@ -4,6 +4,7 @@
 #include <avr/interrupt.h>
 #include "autoconf.h"
 #include "command.h"
+#include "compiler.h"
 #include "dht.h"
 #include "internal.h"
 #include "sched.h"
@@ -83,6 +84,10 @@ dht_gpio_low(struct dht_gpio *g)
 void
 dht_gpio_receive(struct dht_gpio *g, struct dht_decoder *d)
 {
+    // Clear the frame buffer while DATA is still driven LOW. A rising edge
+    // during initialization must not be lost between sampling and IRQ enable.
+    dht_decode_start(d, 0, 0);
+    barrier();
     dht_gpio_stop(g);
     // Clear stale flags BEFORE sampling/enabling. A late pull-up edge may
     // still arrive; WAIT_HIGH handles it without mistaking it for a response.
@@ -94,13 +99,20 @@ dht_gpio_receive(struct dht_gpio *g, struct dht_decoder *d)
     }
     uint16_t clock = TCNT1;
     g->level = dht_gpio_read(g);
-    dht_decode_start(d, g->level, clock);
+    d->edge_clock = clock;
+    d->state = g->level ? DHT_WAIT_RESPONSE : DHT_WAIT_HIGH;
     receiver = g;
     if (g->pin == GPIO('B', 5)) {
         PCMSK0 |= 1<<PCINT5;
         PCICR |= 1<<PCIE0;
     } else {
         EIMSK |= 1<<INT0;
+    }
+    // Cover a pull-up edge between the first sample and arming the IRQ.
+    // A queued IRQ for this same rising edge will see an unchanged level.
+    if (!g->level && dht_gpio_read(g)) {
+        g->level = 1;
+        d->state = DHT_WAIT_RESPONSE;
     }
 }
 

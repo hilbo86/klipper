@@ -1,9 +1,9 @@
 # DHT11 / DHT22 auf AVR-Nebencontrollern
 
 Stand: 03.11.2026. Implementierung für den lokalen RF2000-Fork von Klipper.
-Die Software ist offline geprüft. Eine Hardwareabnahme hat noch nicht
-stattgefunden. Keine Firmware wurde geflasht, keine produktive Konfiguration
-geändert und kein Dienst neu gestartet.
+Die Software ist offline geprüft. Der Nutzer hat die Nano-Firmwares inzwischen
+installiert und Temperaturmessungen im Dashboard bestätigt. Eine vollständige
+Hardwareabnahme einschließlich Dauerlast und Fehlerfällen steht noch aus.
 
 ## Voraussetzungen
 
@@ -105,6 +105,82 @@ Gültigkeitsflag. Für Diagnose und Auswertung deshalb das `dht_status`-Objekt
 verwenden. Die DHT-Werte dürfen unabhängig von der Anzeige nicht für
 Heizungsregelung oder Sicherheitsentscheidungen verwendet werden.
 Es gibt keinen Patch am Verhalten anderer Temperatursensoren.
+
+### Konsole und Dashboard
+
+Mit dem aktualisierten Hostadapter können alle Statusfelder unmittelbar in
+der Mainsail-Konsole abgefragt werden; ein zusätzliches Makro ist nicht nötig:
+
+```text
+QUERY_DHT SENSOR=waermetauscher
+QUERY_DHT SENSOR=druckkammer
+```
+
+`SENSOR` ist der Name hinter `[temperature_sensor ...]`. Die Ausgabe enthält
+Temperatur, Feuchtigkeit, `valid`, `last_error`, `age_seconds`, `ok_count` und
+alle Fehlerzähler als JSON. Eine Abfrage löst keine zusätzliche Messung aus.
+Die Zähler laufen seit dem Start des aktuellen Klippy-Prozesses.
+`last_error` bezeichnet das letzte Messergebnis; die zeitliche Gültigkeit
+steht gesondert in `valid`, deshalb kann ein veralteter Wert weiterhin
+`last_error: "OK"` haben.
+
+Bereits mit der ersten Treiberversion können dieselben Felder über Moonraker
+abgerufen werden. Im Browser an der Drucker-/Moonraker-Adresse öffnen:
+
+```text
+/printer/objects/query?dht_status%20waermetauscher
+/printer/objects/query?dht_status%20druckkammer
+```
+
+Die passende Mainsail-Erweiterung erkennt `dht_status <Sensorname>` als
+Zusatzobjekt zur Temperaturzeile und zeigt die Luftfeuchtigkeit in Prozent
+wie beim AHT-Sensor an. Vor der ersten gültigen Messung und nach Ablauf von
+`dht_max_age` wird der Feuchtewert ausgeblendet. In den Einstellungen der
+Sensorzeile lässt er sich wie andere Zusatzwerte ein-/ausblenden.
+Gültigkeitsflags, Fehlertexte und Zähler bleiben in der Diagnoseabfrage und
+werden nicht als numerische Zusatzmesswerte gerendert.
+
+Für diese Erweiterung sind sowohl der aktualisierte Klipper-Hostadapter
+als auch die angepasste, gebaute Mainsail-Oberfläche zu installieren.
+Für die reine Dashboard-/Konsolenerweiterung ist kein erneutes Flashen nötig.
+
+### Pulsfehler genauer untersuchen
+
+Die neue Empfangskorrektur benötigt dagegen ein Firmwareupdate des betroffenen
+Nanos. Sie initialisiert den Empfangspuffer vor der Busfreigabe und gleicht
+den Pegel nach Aktivierung des IRQ erneut ab. Die Scheduler-Berechnungen
+werden vorgezogen, um die IRQ-Sperrzeit nach Busfreigabe zu verkürzen.
+Pulsgrenzen und Prüfsummenprüfung bleiben unverändert.
+
+Mit dieser Firmware und dem aktualisierten Hostadapter kann der letzte
+Pulsfehler zusätzlich abgefragt werden, beispielsweise für den Sensor
+`temp_ambient`:
+
+```text
+QUERY_DHT SENSOR=temp_ambient DIAGNOSTICS=1
+```
+
+Die normale Statusausgabe enthält dann zusätzlich `last_pulse_error`:
+
+- `phase`: Empfangszustand, etwa `WAIT_HIGH`, `RESPONSE_LOW` oder `BIT_HIGH`.
+- `bits_received`: Anzahl der vor dem Fehler vollständig empfangenen Bits.
+- `duration_us`: Abstand zum vorherigen relevanten Flankenzeitstempel.
+- `level`: gelesener Pegel der beanstandeten Flanke, 0 oder 1.
+- `measurement_clock`: roher 32-Bit-MCU-Zähler des Messbeginns, kein absoluter
+  Zeitstempel; bei 16 MHz läuft dieser nach etwa 268 s über.
+
+Gab es seit der MCU-Konfiguration keinen Pulsfehler, ist das Feld `null`.
+Der letzte Fehler bleibt auch nach erfolgreichen Messungen erhalten; er
+beschreibt nicht zwingend den neuesten Rahmen. Hostzähler können bei einem
+Klippy-Neustart neu beginnen, während diese MCU-Diagnose noch erhalten ist.
+Die gemessenen Abstände enthalten Interruptlatenz und ersetzen keine
+elektrische Messung am DATA-Pin.
+
+Die Diagnose erfasst nur einen kleinen Datensatz beim Fehler. Sie benötigt
+keinen Ringpuffer und sendet keine ungefragten Meldungen. Ohne
+`DIAGNOSTICS=1` verhält sich die Hostabfrage auch mit alter Nano-Firmware
+wie bisher; eine nicht unterstützte Detailabfrage liefert einen verständlichen
+Hinweis auf das erforderliche Firmwareupdate.
 
 Einzelne DHT-Protokollfehler sind normale Statusmeldungen. Ein physischer
 MCU-Ausfall bleibt dagegen Klippers normale MCU-Verbindungsstörung und

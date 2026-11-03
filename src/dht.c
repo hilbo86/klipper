@@ -16,6 +16,9 @@ struct dht {
     struct dht_decoder decoder;
     struct dht_gpio gpio;
     uint8_t type, phase, pending, status;
+    uint32_t error_clock;
+    uint16_t error_ticks;
+    uint8_t error_state, error_bits, error_level, have_pulse_error;
 };
 static struct dht *active_dht;
 static struct task_wake dht_wake;
@@ -40,8 +43,17 @@ dht_edge(uint8_t level, uint16_t clock)
     if (!d || d->phase != DHT_RECEIVE)
         return;
     uint8_t status = dht_decode_edge(&d->decoder, level, clock);
-    if (status != DHT_PENDING)
+    if (status != DHT_PENDING) {
+        if (status == DHT_PULSE_ERROR) {
+            d->error_clock = d->start_clock;
+            d->error_ticks = clock - d->decoder.edge_clock;
+            d->error_state = d->decoder.state;
+            d->error_bits = d->decoder.bits;
+            d->error_level = level;
+            d->have_pulse_error = 1;
+        }
         dht_finish(d, status);
+    }
 }
 
 static uint_fast8_t
@@ -68,12 +80,16 @@ dht_event(struct timer *timer)
         timer->waketime = d->start_clock
             + timer_from_us(d->type == DHT11 ? 20000 : 2000);
         return SF_RESCHEDULE;
-    case DHT_RELEASE:
-        dht_gpio_receive(&d->gpio, &d->decoder);
+    case DHT_RELEASE: {
+        // Prepare the scheduler before releasing DATA, leaving as little
+        // masked time as possible before the sensor's first response edge.
+        uint32_t clock = timer_read_time();
         d->phase = DHT_RECEIVE;
-        d->deadline = timer_read_time() + timer_from_us(8000);
-        timer->waketime = timer_read_time() + timer_from_us(250);
+        d->deadline = clock + timer_from_us(8000);
+        timer->waketime = clock + timer_from_us(250);
+        dht_gpio_receive(&d->gpio, &d->decoder);
         return SF_RESCHEDULE;
+    }
     case DHT_RECEIVE: {
         // Checking every 250us bounds inter-edge gaps well below the 4096us
         // TCNT1 wrap. Thus a missing edge cannot alias a valid short pulse.
@@ -155,6 +171,23 @@ command_query_dht(uint32_t *args)
     irq_restore(flag);
 }
 DECL_COMMAND(command_query_dht, "query_dht oid=%c clock=%u rest_ticks=%u");
+
+void
+command_query_dht_diagnostics(uint32_t *args)
+{
+    uint8_t oid = args[0];
+    struct dht *d = oid_lookup(oid, command_config_dht);
+    irqstatus_t flag = irq_save();
+    uint32_t clock = d->error_clock;
+    uint16_t ticks = d->error_ticks;
+    uint8_t present = d->have_pulse_error, state = d->error_state;
+    uint8_t bits = d->error_bits, level = d->error_level;
+    irq_restore(flag);
+    sendf("dht_diagnostics oid=%c clock=%u present=%c state=%c"
+          " bits=%c ticks=%hu level=%c",
+          oid, clock, present, state, bits, ticks, level);
+}
+DECL_COMMAND(command_query_dht_diagnostics, "query_dht_diagnostics oid=%c");
 
 void
 dht_task(void)

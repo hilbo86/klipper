@@ -204,3 +204,106 @@ Damit sind M1–M4 für die Software umgesetzt und offline geprüft.
 Die produktive Bestandsaufnahme von M0 und M5 bleiben ausdrücklich offen.
 Die Anleitung zur Freigabe und zum Einzelgeräte-Rollback steht in
 [DHT.md](DHT.md#hardwareabnahme-und-rückweg--nur-nach-gesonderter-freigabe).
+
+## Nachtrag: Konsolenabfrage und Luftfeuchtigkeit im Dashboard
+
+Der Nutzer hat nach Installation der Nano-Firmwares und des Hostbranches
+Temperaturen im Dashboard bestätigt. Elektrische Messungen und die übrige
+Hardwareabnahme werden damit nicht als abgeschlossen behandelt.
+
+Die Feuchtigkeit war bereits im Objekt `dht_status <Name>` vorhanden.
+Mainsails Temperaturzeile erkennt zusätzliche Messwerte jedoch anhand einer
+Liste bekannter Objektpräfixe; `dht_status` fehlte dort. Die Ergänzung im
+Mainsail-Branch `feature/dht-avr` basiert auf `TH-Mod` bei `cf2d6a1b` und
+umfasst drei Produktionszeilen: neues Präfix sowie Beschränkung auf
+`humidity` in Anzeige und Sensoreinstellungen. Dadurch werden Flags und
+Zähler nicht versehentlich als numerische Messwerte formatiert.
+Feuchtigkeit ohne gültigen Wert bleibt ausgeblendet, die AHT-Anbindung bleibt
+erhalten. Der generische Klipper-Temperatursensor wird weiterhin nicht geändert.
+
+Im Klipper-Host wird zusätzlich `QUERY_DHT SENSOR=<Name>` automatisch pro
+Sensor registriert. Der Befehl liefert Werte, Gültigkeit, Alter und alle
+Fehlerzähler als JSON, ohne eine zusätzliche Messung auszulösen. Hostbasis
+für diesen Nachtrag ist DHT-Commit `80058afb9`. Keine MCU-Quelldatei und kein
+MCU-Nachrichtenformat werden durch diese Ergänzung geändert; die geflashten
+Nano-Firmwares können weiterverwendet werden.
+
+Nachtrag-Prüfungen:
+
+- **133 Klipper-Unittests bestanden**, darunter Befehlsausführung im echten
+  G-Code-Dispatcher, Sensorauswahl, unbekannter Sensor, Anfangszustand und
+  Staleness bei wiederholter Diagnoseabfrage.
+- **7 Klippy-Integrationstests bestanden**, nun einschließlich beider
+  `QUERY_DHT`-Aufrufe mit simulierten Nanos.
+- **60 Mainsail-Unittests bestanden**, darunter fünf neue Fälle für
+  Sensorzuordnung, reine Feuchteanzeige und Einstellungen, Aktualisierung
+  auf `null`, fehlende Anfangsmessung und unveränderten AHT-Fallback.
+- ESLint, Prettier und vollständiger Mainsail-Produktionsbuild bestanden.
+- Fertiges Frontendarchiv: `../../mainsail/dist/mainsail-dht.zip`,
+  Buildkennung `v2.19.0-dht`; ZIP-Inhalt und Integrität geprüft.
+
+Die Klipper- und Mainsail-Änderungen dieses Nachtrags liegen lokal auf den
+jeweiligen `feature/dht-avr`-Branches. Eine Veröffentlichung auf GitHub oder
+Installation der Oberfläche auf dem Drucker wurde nicht ausgeführt.
+
+## Nachtrag: DHT11-Pulsfehler im Hardwaretest
+
+Der Nutzer meldete folgende Zähler aus demselben Statusabruf:
+
+| Sensor | Erfolgreich | CRC-Fehler | Protokoll-/Busfehler | Timeout | Gültige Quote |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| DHT11 `temp_ambient` | 296 | 4 | 219 | 0 | 57,03 % von 519 |
+| DHT22 `temp_chamber_below` | 519 | 0 | 0 | 0 | 100 % von 519 |
+
+Beim DHT11 war das letzte Ergebnis `PULSE_ERROR`, der letzte erfolgreiche
+Wert 13,98 s alt. `valid=true` folgt dem vereinbarten Alterslimit von 15 s
+und behauptet nicht, dass der jüngste Rahmen erfolgreich war. Der Nutzer
+bestätigte einen einzelnen DHT11, etwa 3 cm PCB-Leiterbahn und einen externen
+1-kΩ-Pull-up. Eine schwach hochgezogene lange Leitung wird deshalb nicht
+ohne weitere Messung als Ursache angenommen.
+
+Die Quellprüfung ergab ein unabhängig davon vorhandenes Empfangsrennen:
+Der alte Ablauf gab DATA frei, las den Pegel und initialisierte danach
+den Decoder, bevor der IRQ aktiviert wurde. Eine steigende Flanke während
+dieser Initialisierung konnte verloren gehen. Der erste Sensor-LOW wurde
+dann bei gleichem gespeicherten Pegel ignoriert und ein späterer Puls als
+Fehler interpretiert. Ein gezielt injizierter Flankenwechsel reproduziert
+diesen Fehler im alten Code. Die korrigierte Initialisierung vor Freigabe
+und die Pegelprüfung nach IRQ-Aktivierung bestehen diesen Test auf beiden
+IRQ-Pfaden. Ein zweiter Test deckt die Lücke beim Aktivieren des IRQ ab.
+Zusätzlich wurden die Scheduler-Berechnungen vor die Busfreigabe verlegt.
+
+Damit ist ein Softwarefehler nachgewiesen und korrigiert. Dass er die
+gemeldeten 219 Protokoll-/Busfehler erklärt, ist ohne erneuten Hardwarelauf
+noch nicht nachgewiesen. Die Pulsgrenzen wurden bewusst nicht erweitert.
+
+Eine neue optionale Abfrage `query_dht_diagnostics oid=%c` liest den letzten
+Pulsfehler im Task-/Kommandokontext. Empfangszustand, Bitzahl, Tickabstand,
+Pegel und Messbeginn werden bei `PULSE_ERROR` gesichert; kein `sendf` erfolgt
+aus der ISR. Der Host stellt die Diagnose über
+`QUERY_DHT SENSOR=temp_ambient DIAGNOSTICS=1` bereit. Das bisherige
+`dht_result`-Format und `DHT_VERSION=1` bleiben kompatibel.
+
+Neue Offline-Ergebnisse:
+
+- 136 Unittests bestanden, darunter nun 21 C-Szenarien.
+- Alle sieben Klippy-Integrationstests bestanden, einschließlich einer
+  Detailabfrage mit `DIAGNOSTICS=1` gegen das neue MCU-Wörterbuch.
+- Alle acht AVR-Builds bestanden; Nano-Profile mit DHT: `.text=18468`,
+  `.data=42`, `.bss=365`. Der Flashmehrbedarf gegenüber dem Nano-Profil ohne
+  DHT beträgt rund 2,6 KiB.
+- Der AVR-Allokationsaufruf zeigt `sizeof(struct dht)=54`; mit 5 Byte
+  statischem Mehrbedarf und 4 Byte OID-Eintrag sind es 63 Byte dauerhafter RAM.
+- Konservative ISR-Obergrenze beider Vektoren: 255 Takte, etwa 15,94 µs.
+- Die zuvor bereitgestellten Nano-ELF-/HEX-/Wörterbuchdateien wurden vor dem
+  Neubau unter `out/dht-before-rx-fix` mit SHA256 gesichert und anschließend
+  dauerhaft unter `../dht-backups/2026-11-03/pre-rx-fix` abgelegt.
+- Testpaket: `out/dht-rx-fix/DHT11-rx-fix.zip`, mit neuer DHT11-Firmware,
+  Hostadapter, vorheriger DHT-Firmware, Hostadapter aus `80058afb9`, Anleitung
+  und SHA256-Prüfsummen. Diese vorherige DHT-Firmware ist kein Abbild der
+  Installation vor Beginn der DHT-Erweiterung.
+
+Für den ersten Wiederholungstest ist nur der DHT11-Nano vorgesehen. Der
+fehlerfreie DHT22 muss dafür nicht aktualisiert werden. Neue Quote und
+gegebenenfalls Pulsdiagnose müssen weiterhin am Gerät erhoben werden;
+automatisches Flashen oder ein Dienstneustart wurden nicht ausgeführt.

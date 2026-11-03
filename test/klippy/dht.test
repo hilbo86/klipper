@@ -3,7 +3,11 @@ DICTIONARY atmega2560.dict nano_a=atmega328p-dht.dict nano_b=atmega328p-dht.dict
 CONFIG dht.cfg
 M105
 DHT_STATUS
+QUERY_DHT SENSOR=chamber
+QUERY_DHT SENSOR=exchanger
+QUERY_DHT SENSOR=exchanger DIAGNOSTICS=1
 SET_PIN PIN=peltier_1 VALUE=0
 SET_PIN PIN=peltier_2 VALUE=0
 G4 P15000
 DHT_STATUS
+QUERY_DHT SENSOR=chamber

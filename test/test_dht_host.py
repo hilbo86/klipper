@@ -1,4 +1,6 @@
 """DHT host adapter against the real pin allocator and message codec."""
+import contextlib
+import json
 import pathlib
 import sys
 import unittest
@@ -6,6 +8,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'klippy'))
 from extras import dht_sensor
+import gcode
 import msgproto
 import pins
 
@@ -44,6 +47,8 @@ class MCU:
     def __init__(self):
         self.oid = 0
         self.commands, self.callbacks, self.responses = [], [], {}
+        self.diagnostic_response = None
+        self.diagnostic_requests = []
         self.constants = dict(DHT_VERSION=1, MCU='atmega328p',
                               CLOCK_FREQ=16000000)
 
@@ -78,13 +83,40 @@ class MCU:
     def estimated_print_time(self, eventtime):
         return eventtime - 90.
 
+    def check_valid_response(self, fmt):
+        return fmt == dht_sensor.DIAGNOSTIC_FORMAT \
+            and self.diagnostic_response is not None
+
+    def lookup_query_command(self, request, response, oid):
+        mcu = self
+
+        class Query:
+            def send(self, args):
+                mcu.diagnostic_requests.append((request, response, oid, args))
+                return mcu.diagnostic_response
+
+        return Query()
+
+
+class Reactor:
+    now = 102.
+
+    def monotonic(self):
+        return self.now
+
+    def mutex(self):
+        return contextlib.nullcontext()
+
 
 class Printer:
     config_error = ValueError
 
     def __init__(self):
+        self.reactor = Reactor()
         self.pins = pins.PrinterPins()
         self.objects = {'pins': self.pins}
+        self.gcode = gcode.GCodeDispatch(self)
+        self.objects['gcode'] = self.gcode
         self.factories = {}
         self.a, self.b = MCU(), MCU()
         self.pins.register_chip('nano_a', self.a)
@@ -92,6 +124,21 @@ class Printer:
 
     def lookup_object(self, name):
         return self.objects[name]
+
+    def get_reactor(self):
+        return self.reactor
+
+    def get_start_args(self):
+        return {}
+
+    def register_event_handler(self, event, callback):
+        pass
+
+    def get_state_message(self):
+        return 'Printer is ready', 'ready'
+
+    def send_event(self, event):
+        pass
 
     def lookup_objects(self, prefix):
         return [(key, value) for key, value in self.objects.items()
@@ -266,6 +313,100 @@ class TestDHTHost(unittest.TestCase):
         self.response(clock=48000000, temp10=250)
         self.assertEqual(self.measurements, [(13., 25.)])
         self.assertEqual(self.sensor.range_errors, 2)
+
+    def test_console_query_reports_live_status_without_sampling(self):
+        output = []
+        dispatch = self.printer.gcode
+        dispatch.register_output_handler(output.append)
+        dispatch._handle_ready()
+
+        def query():
+            output.clear()
+            dispatch.run_script_from_command('QUERY_DHT SENSOR=chamber')
+            report = '\n'.join(output)
+            self.assertIn('DHT chamber:', report)
+            return json.loads(report[report.index('{'):])
+
+        self.assertEqual(query(), self.sensor.get_status(102.))
+        self.assertIn('QUERY_DHT', dispatch.get_command_help())
+        self.response()
+        before_commands = list(self.printer.b.commands)
+        self.assertEqual(query(), self.sensor.get_status(102.))
+        self.assertEqual(self.printer.b.commands, before_commands)
+        self.printer.reactor.now = 116.
+        status = query()
+        self.assertFalse(status['valid'])
+        self.assertIsNone(status['humidity'])
+        self.assertEqual(status['ok_count'], 1)
+        self.assertEqual(status['last_error'], 'OK')
+
+    def test_console_query_selects_sensor_and_rejects_unknown_name(self):
+        dht_sensor.DHTSensor(Config(
+            self.printer, 'temperature_sensor exchanger',
+            sensor_type='DHT11', sensor_pin='nano_a:PB5'))
+        self.printer.a.responses[1](dict(clock=16000000, status=0,
+                                       temp10=246, humidity10=553))
+        output = []
+        dispatch = self.printer.gcode
+        dispatch.register_output_handler(output.append)
+        dispatch._handle_ready()
+        output.clear()
+        dispatch.run_script_from_command('QUERY_DHT SENSOR=exchanger')
+        report = '\n'.join(output)
+        self.assertIn('DHT exchanger:', report)
+        self.assertEqual(json.loads(report[report.index('{'):])['humidity'],
+                         55.3)
+        with self.assertLogs(level='WARNING'), \
+                self.assertRaises(gcode.CommandError):
+            dispatch.run_script_from_command('QUERY_DHT SENSOR=missing')
+
+    def test_pulse_diagnostics_decode_and_query_without_resampling(self):
+        fmt = msgproto.MessageFormat([1], dht_sensor.DIAGNOSTIC_FORMAT)
+        encoded = bytes(fmt.encode([1, 16000000, 1, 5, 17, 132, 0]))
+        params, end = fmt.parse(encoded, 0)
+        self.assertEqual(end, len(encoded))
+        self.printer.b.diagnostic_response = params
+        self.response()
+        output = []
+        dispatch = self.printer.gcode
+        dispatch.register_output_handler(output.append)
+        dispatch._handle_ready()
+        output.clear()
+        dispatch.run_script_from_command(
+            'QUERY_DHT SENSOR=chamber DIAGNOSTICS=1')
+        report = '\n'.join(output)
+        status = json.loads(report[report.index('{'):])
+        self.assertEqual(status['last_pulse_error'], {
+            'phase': 'BIT_HIGH', 'bits_received': 17, 'duration_us': 8.25,
+            'level': 0, 'measurement_clock': 16000000})
+        self.assertEqual(status['ok_count'], 1)
+        self.assertEqual(self.printer.b.commands, [])
+        self.assertEqual(self.printer.b.diagnostic_requests, [(
+            'query_dht_diagnostics oid=%c', dht_sensor.DIAGNOSTIC_FORMAT,
+            1, [1])])
+
+    def test_pulse_diagnostics_report_no_previous_error(self):
+        self.printer.b.diagnostic_response = dict(present=0)
+        output = []
+        dispatch = self.printer.gcode
+        dispatch.register_output_handler(output.append)
+        dispatch._handle_ready()
+        output.clear()
+        dispatch.run_script_from_command(
+            'QUERY_DHT SENSOR=chamber DIAGNOSTICS=1')
+        report = '\n'.join(output)
+        self.assertIsNone(json.loads(report[report.index('{'):])
+                          ['last_pulse_error'])
+
+    def test_old_firmware_keeps_normal_query_and_rejects_diagnostics(self):
+        dispatch = self.printer.gcode
+        dispatch._handle_ready()
+        dispatch.run_script_from_command('QUERY_DHT SENSOR=chamber')
+        with self.assertLogs(level='WARNING'), self.assertRaisesRegex(
+                gcode.CommandError, 'updated Nano firmware'):
+            dispatch.run_script_from_command(
+                'QUERY_DHT SENSOR=chamber DIAGNOSTICS=1')
+        self.assertEqual(self.printer.b.diagnostic_requests, [])
 
 
 if __name__ == '__main__':
