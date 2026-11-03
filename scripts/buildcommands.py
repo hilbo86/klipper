@@ -517,6 +517,7 @@ def tool_versions(tools):
     for tool in tools:
         # Extract first line from "tool --version" output
         verstr = check_output("%s --version" % (tool,)).split('\n')[0]
+        verstr = verstr.rstrip('\r')
         # Check if this tool looks like a binutils program
         isbinutils = 0
         if verstr.startswith('GNU '):
