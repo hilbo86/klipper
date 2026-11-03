@@ -31,7 +31,7 @@ This object is loaded automatically for configured I2C clients:
   `by_status_last_hour`, `last_error`, `last_error_time` (monotonic host time),
   and `skipped_total` (locally suppressed requests, not additional bus errors).
 
-`I2C_ERRORS` prints these diagnostics. See
+`IIC_ERRORS` prints these diagnostics. See
 [I2C fault tolerance](I2C_Fault_Tolerance.md) for supported firmware, client
 policy, and which operations supply error reports.
 

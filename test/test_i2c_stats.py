@@ -1,6 +1,8 @@
+import contextlib
 import unittest
 from unittest import mock
 
+from klippy import gcode
 from klippy.extras import i2c_stats
 
 
@@ -9,6 +11,9 @@ class FakeReactor:
 
     def monotonic(self):
         return self.now
+
+    def mutex(self):
+        return contextlib.nullcontext()
 
 
 class FakeGCode:
@@ -24,12 +29,26 @@ class FakeGCode:
 
 
 class FakePrinter:
+    config_error = ValueError
+
     def __init__(self):
         self.reactor = FakeReactor()
         self.gcode = FakeGCode()
 
     def get_reactor(self):
         return self.reactor
+
+    def get_start_args(self):
+        return {}
+
+    def register_event_handler(self, event, callback):
+        pass
+
+    def get_state_message(self):
+        return 'Printer is ready', 'ready'
+
+    def invoke_shutdown(self, message):
+        raise AssertionError(message)
 
     def lookup_object(self, name):
         assert name == 'gcode'
@@ -90,8 +109,27 @@ class I2CStatsTest(unittest.TestCase):
     def client_snapshot(self, eventtime=None):
         return self.snapshot(eventtime)['clients']['mcu:1']
 
+    @mock.patch('klippy.extras.i2c_stats.logging.warning')
+    def test_command_registers_and_runs_in_real_klipper_dispatcher(self,
+                                                                warning):
+        config = FakeConfig()
+        printer = config.printer
+        printer.gcode = dispatch = gcode.GCodeDispatch(printer)
+        stats = i2c_stats.load_config(config)
+        output = []
+        dispatch.register_output_handler(output.append)
+        dispatch._handle_ready()
+        stats.register_client(self.client, 'ads1x1x laser_adc')
+        stats.note_error(self.client, 'BUS_TIMEOUT')
+        output.clear()
+        dispatch.run_script_from_command('IIC_ERRORS')
+        report = '\n'.join(output)
+        for expected in ('last hour: 1', 'ads1x1x laser_adc', 'mcu=mcu',
+                         'bus=twi1', 'address=0x48', 'BUS_TIMEOUT=1'):
+            self.assertIn(expected, report)
+
     def test_registration_and_live_metadata(self):
-        self.assertEqual(self.config.printer.gcode.name, 'I2C_ERRORS')
+        self.assertEqual(self.config.printer.gcode.name, 'IIC_ERRORS')
         snapshot = self.client_snapshot()
         self.assertEqual(snapshot['name'], 'ads1x1x laser_adc')
         self.assertEqual(snapshot['address'], 0x48)

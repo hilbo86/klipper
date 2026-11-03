@@ -831,9 +831,9 @@ heater. If a target temperature is not supplied, the target is 0.
 
 ### I2C diagnostics
 
-#### `I2C_ERRORS`
+#### `IIC_ERRORS`
 
-`I2C_ERRORS`: Report failed I2C transfers over the last hour and since Klippy
+`IIC_ERRORS`: Report failed I2C transfers over the last hour and since Klippy
 start, grouped by client, MCU, bus, OID, address, and error status. Locally
 suppressed requests during a tolerant client's cooldown are listed separately.
 The command is available automatically when an I2C client is configured. See

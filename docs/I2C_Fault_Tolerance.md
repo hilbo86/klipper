@@ -123,11 +123,13 @@ Es wurde keine laufende Maschine aktualisiert oder geflasht.
 Automatische Konsolenmeldungen enthalten Clientname, MCU, Bus, OID, Adresse,
 Fehlerart und Gesamtzahl. Sie halten den Controller nicht an. Die Begrenzung
 auf eine Meldung pro Minute und Client verhindert eine Konsolenflut bei einem
-dauerhaften Defekt; `I2C_ERRORS` zeigt jederzeit alle gezählten Fehler.
+dauerhaften Defekt; `IIC_ERRORS` zeigt jederzeit alle gezählten Fehler.
 
-`I2C_ERRORS` zeigt die Fehler der letzten Stunde, die Gesamtzahl seit dem
+`IIC_ERRORS` zeigt die Fehler der letzten Stunde, die Gesamtzahl seit dem
 Klippy-Start sowie Clientname, MCU, Bus, OID, Adresse, Fehlerarten und die
-Anzahl lokal unterdrückter Zugriffe. Ein fehlgeschlagener Transfer zählt
+Anzahl lokal unterdrückter Zugriffe. Der Befehlsname verwendet die Buchstaben
+`IIC`, da Klipper bei erweiterten Befehlen keine Ziffer an zweiter Stelle
+akzeptiert. Ein fehlgeschlagener Transfer zählt
 einmal, unabhängig von der Zahl betroffener ADC-Kanäle. Ein wegen der
 Wartepause unterdrückter Zugriff zählt nicht als weiterer Busfehler.
 
@@ -197,7 +199,7 @@ Logbegrenzung, Pausen vor erneuten Versuchen, verworfene Messungen,
 Wiederaufnahme und erhaltene Bereichsprüfungen.
 
 Zur Abnahme am Laser den ADC unter laufender Bewegung gezielt kurz
-unterbrechen, `I2C_ERRORS` und `last_sample_age` beobachten und nach dem
+unterbrechen, `IIC_ERRORS` und `last_sample_age` beobachten und nach dem
 Wiederanschließen frische Messwerte prüfen. Dabei die kritischen Ausgänge
 und Step-Signale messen. Anschließend einen längeren Busausfall prüfen:
 Der Fehlerzähler muss weiter steigen, die Abfragerate begrenzt bleiben und

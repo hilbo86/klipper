@@ -83,7 +83,7 @@ class I2CStats:
         self.clients = {}
         self.gcode = self.printer.lookup_object('gcode')
         self.gcode.register_command(
-            'I2C_ERRORS', self.cmd_I2C_ERRORS, desc=self.cmd_I2C_ERRORS_help)
+            'IIC_ERRORS', self.cmd_IIC_ERRORS, desc=self.cmd_IIC_ERRORS_help)
 
     def _client_key(self, client):
         return '%s:%d' % (client.get_mcu().get_name(), client.get_oid())
@@ -119,9 +119,9 @@ class I2CStats:
             'clients': clients,
         }
 
-    cmd_I2C_ERRORS_help = 'Report I2C errors in the last hour by client'
+    cmd_IIC_ERRORS_help = 'Report I2C errors in the last hour by client'
 
-    def cmd_I2C_ERRORS(self, gcmd):
+    def cmd_IIC_ERRORS(self, gcmd):
         status = self.get_status(self.reactor.monotonic())
         lines = [
             'I2C errors in the last hour: %d; total since Klippy start: %d'
