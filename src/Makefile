@@ -13,6 +13,7 @@ src-$(CONFIG_WANT_BUTTONS) += buttons.c
 src-$(CONFIG_WANT_TMCUART) += tmcuart.c
 src-$(CONFIG_WANT_NEOPIXEL) += neopixel.c
 src-$(CONFIG_WANT_PULSE_COUNTER) += pulse_counter.c
+src-$(CONFIG_WANT_DHT) += dht.c dht_protocol.c
 src-$(CONFIG_WANT_ST7920) += lcd_st7920.c
 src-$(CONFIG_WANT_HD44780) += lcd_hd44780.c
 src-$(CONFIG_WANT_SOFTWARE_SPI) += spi_software.c

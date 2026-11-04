@@ -302,6 +302,17 @@ config CANBUS_FILTER
     default y if CANSERIAL
 
 # Stepper optimizations
+config WANT_DHT
+    bool "DHT11/DHT22 on auxiliary ATmega328P (16MHz, no steppers)"
+    depends on MACH_AVR && MACH_atmega328p && CLOCK_FREQ = 16000000
+    depends on !HAVE_STEPPER && !WANT_HARD_PWM
+    default n
+    help
+        Interrupt based environmental sensors on PB5/D13 or PD2/D2.
+        One sensor per MCU. Requires an external pull-up and a dedicated
+        auxiliary MCU without hard real-time duties. Never use for heaters.
+        Hardware PWM is excluded to protect Klipper's Timer1 timebase.
+
 config HAVE_STEPPER
     bool "Support stepper motion" if HAVE_LIMITED_CODE_SIZE
     depends on HAVE_GPIO
