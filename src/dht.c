@@ -12,15 +12,11 @@
 enum { DHT_STOPPED, DHT_START, DHT_RELEASE, DHT_RECEIVE, DHT_REPORT };
 struct dht {
     struct timer timer;
-    uint32_t rest_ticks, start_clock, next_start, ready_clock, deadline;
+    uint32_t rest_ticks, start_clock, next_start, ready_clock;
     struct dht_decoder decoder;
     struct dht_gpio gpio;
     uint8_t type, phase, pending, status;
-    uint32_t error_clock;
-    uint16_t error_ticks;
-    uint8_t error_state, error_bits, error_level, have_pulse_error;
 };
-static struct dht *active_dht;
 static struct task_wake dht_wake;
 
 DECL_CONSTANT("DHT_VERSION", 1);
@@ -35,25 +31,14 @@ dht_finish(struct dht *d, uint8_t status)
     sched_wake_task(&dht_wake);
 }
 
-// Called only with IRQs disabled. No CRC / conversion / serial I/O here.
+// Called only for the armed GPIO receiver, with IRQs disabled.
 void
-dht_edge(uint8_t level, uint16_t clock)
+dht_edge(struct dht_gpio *gpio, uint8_t level, uint16_t clock)
 {
-    struct dht *d = active_dht;
-    if (!d || d->phase != DHT_RECEIVE)
-        return;
+    struct dht *d = container_of(gpio, struct dht, gpio);
     uint8_t status = dht_decode_edge(&d->decoder, level, clock);
-    if (status != DHT_PENDING) {
-        if (status == DHT_PULSE_ERROR) {
-            d->error_clock = d->start_clock;
-            d->error_ticks = clock - d->decoder.edge_clock;
-            d->error_state = d->decoder.state;
-            d->error_bits = d->decoder.bits;
-            d->error_level = level;
-            d->have_pulse_error = 1;
-        }
+    if (status != DHT_PENDING)
         dht_finish(d, status);
-    }
 }
 
 static uint_fast8_t
@@ -85,23 +70,21 @@ dht_event(struct timer *timer)
         // masked time as possible before the sensor's first response edge.
         uint32_t clock = timer_read_time();
         d->phase = DHT_RECEIVE;
-        d->deadline = clock + timer_from_us(8000);
-        timer->waketime = clock + timer_from_us(250);
+        timer->waketime = clock + timer_from_us(1000);
         dht_gpio_receive(&d->gpio, &d->decoder);
         return SF_RESCHEDULE;
     }
     case DHT_RECEIVE: {
-        // Checking every 250us bounds inter-edge gaps well below the 4096us
-        // TCNT1 wrap. Thus a missing edge cannot alias a valid short pulse.
+        // A 1ms guard catches gaps over 200us before the 4096us TCNT1
+        // wrap. Valid pulse sequences finish within 7800us by construction.
         uint16_t gap = dht_gpio_clock() - d->decoder.edge_clock;
-        if (gap > 200 * 16
-            || !timer_is_before(timer_read_time(), d->deadline)) {
+        if (gap > 200 * 16) {
             uint8_t status = d->decoder.state <= DHT_WAIT_RESPONSE
                 ? DHT_NO_RESPONSE : DHT_TIMEOUT;
             dht_finish(d, status);
             break;
         }
-        timer->waketime += timer_from_us(250);
+        timer->waketime += timer_from_us(1000);
         return SF_RESCHEDULE;
     }
     case DHT_REPORT:
@@ -165,29 +148,11 @@ command_query_dht(uint32_t *args)
         d->rest_ticks = rest;
         d->timer.waketime = clock;
         d->phase = DHT_START;
-        active_dht = d;
         sched_add_timer(&d->timer);
     }
     irq_restore(flag);
 }
 DECL_COMMAND(command_query_dht, "query_dht oid=%c clock=%u rest_ticks=%u");
-
-void
-command_query_dht_diagnostics(uint32_t *args)
-{
-    uint8_t oid = args[0];
-    struct dht *d = oid_lookup(oid, command_config_dht);
-    irqstatus_t flag = irq_save();
-    uint32_t clock = d->error_clock;
-    uint16_t ticks = d->error_ticks;
-    uint8_t present = d->have_pulse_error, state = d->error_state;
-    uint8_t bits = d->error_bits, level = d->error_level;
-    irq_restore(flag);
-    sendf("dht_diagnostics oid=%c clock=%u present=%c state=%c"
-          " bits=%c ticks=%hu level=%c",
-          oid, clock, present, state, bits, ticks, level);
-}
-DECL_COMMAND(command_query_dht_diagnostics, "query_dht_diagnostics oid=%c");
 
 void
 dht_task(void)
@@ -227,6 +192,5 @@ dht_shutdown(void)
         d->phase = DHT_STOPPED;
         d->pending = 0;
     }
-    active_dht = NULL;
 }
 DECL_SHUTDOWN(dht_shutdown);

@@ -6,10 +6,6 @@ STATUS = ('OK', 'NO_RESPONSE', 'TIMEOUT', 'PULSE_ERROR', 'CHECKSUM',
           'OUT_OF_RANGE', 'BUS_BUSY')
 RESULT_FORMAT = ('dht_result oid=%c clock=%u status=%c'
                  ' temp10=%hi humidity10=%hu')
-DIAGNOSTIC_FORMAT = ('dht_diagnostics oid=%c clock=%u present=%c state=%c'
-                     ' bits=%c ticks=%hu level=%c')
-PHASES = ('WAIT_HIGH', 'WAIT_RESPONSE', 'RESPONSE_LOW', 'RESPONSE_HIGH',
-          'BIT_LOW', 'BIT_HIGH', 'COMPLETE')
 
 
 class DHTSensor:
@@ -143,23 +139,6 @@ class DHTSensor:
     def cmd_QUERY_DHT(self, gcmd):
         eventtime = self.printer.get_reactor().monotonic()
         status = self.get_status(eventtime)
-        if gcmd.get_int('DIAGNOSTICS', 0, minval=0, maxval=1):
-            if not self._mcu.check_valid_response(DIAGNOSTIC_FORMAT):
-                raise gcmd.error('DHT pulse diagnostics require updated '
-                                 'Nano firmware')
-            query = self._mcu.lookup_query_command(
-                'query_dht_diagnostics oid=%c', DIAGNOSTIC_FORMAT,
-                oid=self._oid)
-            params = query.send([self._oid])
-            status['last_pulse_error'] = None
-            if params['present']:
-                phase = params['state']
-                status['last_pulse_error'] = {
-                    'phase': PHASES[phase] if phase < len(PHASES)
-                    else 'UNKNOWN', 'bits_received': params['bits'],
-                    'duration_us': params['ticks'] / 16.,
-                    'level': params['level'],
-                    'measurement_clock': params['clock']}
         gcmd.respond_info('DHT %s: %s' % (
             self.name, json.dumps(status, sort_keys=True)))
 

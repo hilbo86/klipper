@@ -162,6 +162,13 @@ def main():
         formats = list(dictionary['commands']) + list(dictionary['responses'])
         has_dht = any(key.startswith('config_dht ') for key in formats)
         assert has_dht == enabled
+        assert not any(key.startswith(('query_dht_diagnostics ',
+                                       'query_dht_timing ', 'set_dht_trace ',
+                                       'dht_diagnostics ', 'dht_timing '))
+                       for key in formats)
+        assert not any(name in symbols for name in (
+            'timer_probe', 'trace_requested', 'dht_gpio_timer',
+            'dht_frame_diagnostics', 'active_dht'))
         if enabled:
             assert dictionary['config']['DHT_VERSION'] == 1
             assert re.search(r'\bT __vector_1\b', symbols)

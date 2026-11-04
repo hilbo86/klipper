@@ -35,6 +35,6 @@ void dht_gpio_low(struct dht_gpio *g);
 void dht_gpio_stop(struct dht_gpio *g);
 void dht_gpio_receive(struct dht_gpio *g, struct dht_decoder *d);
 uint16_t dht_gpio_clock(void);
-void dht_edge(uint8_t level, uint16_t clock);
+void dht_edge(struct dht_gpio *gpio, uint8_t level, uint16_t clock);
 
 #endif

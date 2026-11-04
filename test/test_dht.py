@@ -85,11 +85,9 @@ enum { SF_DONE, SF_RESCHEDULE };
 static struct timer *scheduled;
 static uint32_t now;
 static unsigned locked, reports, report_status, report_oid;
+static unsigned receive_events;
 static int report_temp, report_humidity;
 static uint32_t report_clock;
-static unsigned diagnostic_reports, diagnostic_present, diagnostic_state;
-static unsigned diagnostic_bits, diagnostic_ticks, diagnostic_level;
-static uint32_t diagnostic_clock;
 typedef unsigned irqstatus_t;
 static irqstatus_t irq_save(void) { unsigned old=locked; locked=1; return old; }
 static void irq_restore(irqstatus_t old) { locked=old; }
@@ -132,16 +130,6 @@ static void model_shutdown(const char *reason) {
 static void model_send(const char *format, ...) {
     assert(!locked);
     va_list args; va_start(args, format);
-    if (!strncmp(format,"dht_diagnostics ",16)) {
-        assert(va_arg(args, int)==object_oid);
-        diagnostic_clock=va_arg(args, uint32_t);
-        diagnostic_present=va_arg(args, int);
-        diagnostic_state=va_arg(args, int);
-        diagnostic_bits=va_arg(args, int);
-        diagnostic_ticks=va_arg(args, int);
-        diagnostic_level=va_arg(args, int);
-        diagnostic_reports++; va_end(args); return;
-    }
     report_oid=va_arg(args, int); report_clock=va_arg(args, uint32_t);
     report_status=va_arg(args, int); report_temp=va_arg(args, int);
     report_humidity=va_arg(args, int); va_end(args); reports++;
@@ -167,6 +155,7 @@ static void advance_ticks(uint32_t delta) {
         now=scheduled->waketime; TCNT1=now;
         struct timer *t=scheduled;
         irqstatus_t flag=irq_save();
+        if (sensor()->phase==DHT_RECEIVE) receive_events++;
         int result=t->func(t); irq_restore(flag);
         if (result==SF_DONE) scheduled=NULL;
         else assert(timer_is_before(now, t->waketime));
@@ -218,8 +207,8 @@ static void checksum(uint8_t *b) { b[4]=b[0]+b[1]+b[2]+b[3]; }
 static void reset_model(void) {
     inject_rise=inject_arm_rise=0;
     scheduled=NULL; now=TCNT1=0; locked=reports=0;
-    diagnostic_reports=0;
-    object_count=object_oid=allocated=0; active_dht=NULL; receiver=NULL;
+    receive_events=0;
+    object_count=object_oid=allocated=0; receiver=NULL;
     dht_wake.wake=0;
     PINB=PIND=0xff; PCMSK0=PCICR=EIMSK=EICRA=SPCR=0;
     DDRB=DDRD=PORTB=PORTD=0;
@@ -240,7 +229,7 @@ int main(int argc, char **argv) {
             assert(report_temp==expected[i]
                    && report_humidity==(i ? 658 : 553));
             assert(report_clock==start); dht_task(); assert(reports==1);
-            edge(50,1); assert(!sensor()->pending); advance(500); dht_task();
+            edge(50,1); assert(!sensor()->pending); advance(1500); dht_task();
             assert(reports==1 && sensor()->phase==DHT_START);
             assert(scheduled->waketime==start+80000000);
         }
@@ -271,6 +260,25 @@ int main(int argc, char **argv) {
             frame(b,30+i,50+i); dht_task();
             assert(reports==1 && report_status==DHT_OK && report_temp==-101);
         }
+    } else if (!strcmp(name,"watchdog_load")) {
+        begin(DHT11,GPIO('B',5),1);
+        assert(scheduled->waketime==now+1000*16);
+        uint8_t b[]={23,0,22,0,45}; preamble(); frame(b,27,70); dht_task();
+        assert(reports==1 && report_status==DHT_OK && receive_events==3);
+        advance(1500); assert(receive_events==3);
+    } else if (!strcmp(name,"bounded_frame")) {
+        begin(DHT11,GPIO('B',5),1);
+        uint32_t released_at=now;
+        // Every accepted phase has an upper bound. Even this almost
+        // maximal pulse train finishes before 7800us without a total timer.
+        uint8_t b[]={255,255,255,255,252};
+        edge(160,0); edge(120,1); edge(120,0);
+        for (unsigned n=0;n<40;n++) {
+            edge(85,1); edge((b[n/8]>>(7-n%8))&1?100:49,0);
+        }
+        assert(sensor()->decoder.bits==40 && sensor()->pending);
+        assert(now-released_at==7698*16 && receive_events==7);
+        dht_task(); assert(report_status==DHT_OUT_OF_RANGE); released();
     } else if (!strcmp(name,"bad_frames")) {
         for (unsigned mode=0;mode<7;mode++) {
             reset_model(); begin(DHT11,GPIO('B',5),1);
@@ -295,7 +303,7 @@ int main(int argc, char **argv) {
             if (stage>=2) edge(30,0);
             if (stage>=3) edge(80,1);
             if (stage==4) { edge(80,0); bit(1,27,70); }
-            advance(500); dht_task(); released();
+            advance(1500); dht_task(); released();
             assert(reports==1 && report_status==
                    (stage<2?DHT_NO_RESPONSE:DHT_TIMEOUT));
             advance(8000); dht_task(); assert(reports==1);
@@ -319,7 +327,7 @@ int main(int argc, char **argv) {
     } else if (!strcmp(name,"lost_edges")) {
         begin(DHT22,GPIO('D',2),1); preamble(); edge(50,1);
         advance(27); PIND=0; // Drop one falling IRQ; next rise merges.
-        edge(50,1); advance(500); dht_task();
+        edge(50,1); advance(1500); dht_task();
         assert(reports==1 && report_status==DHT_TIMEOUT); released();
     } else if (!strcmp(name,"release_edge")) {
         begin(DHT22,GPIO('D',2),0); edge(4,1);
@@ -344,21 +352,6 @@ int main(int argc, char **argv) {
         configure(DHT11,GPIO('B',5)); PINB=0; query(5000000);
         advance_ticks(scheduled->waketime-now); dht_task(); released();
         assert(reports==1 && report_status==DHT_BUS_BUSY);
-    } else if (!strcmp(name,"pulse_diagnostics")) {
-        begin(DHT11,GPIO('B',5),1);
-        uint32_t args[]={7}; command_query_dht_diagnostics(args);
-        assert(diagnostic_reports==1 && !diagnostic_present);
-        uint32_t start=sensor()->start_clock;
-        preamble(); bit(0,27,70); edge(50,1); edge(5,0);
-        dht_task(); assert(report_status==DHT_PULSE_ERROR);
-        assert(diagnostic_reports==1); // No unsolicited debug messages.
-        command_query_dht_diagnostics(args);
-        assert(diagnostic_reports==2 && diagnostic_present);
-        assert(diagnostic_state==DHT_BIT_HIGH && diagnostic_bits==1);
-        assert(diagnostic_ticks==5*16 && diagnostic_level==0);
-        assert(diagnostic_clock==start && reports==1);
-        query(0); command_query_dht_diagnostics(args);
-        assert(diagnostic_present && diagnostic_clock==start);
     } else if (!strcmp(name,"lifecycle")) {
         for (unsigned action=0;action<3;action++)
         for (unsigned stage=0;stage<9;stage++) {
@@ -388,12 +381,12 @@ int main(int argc, char **argv) {
         }
     } else if (!strcmp(name,"wrap32")) {
         now=0xff000000; TCNT1=now;
-        begin(DHT22,GPIO('D',2),1); advance(500); dht_task();
+        begin(DHT22,GPIO('D',2),1); advance(1500); dht_task();
         assert(reports==1 && report_status==DHT_NO_RESPONSE);
         assert(scheduled && timer_is_before(now, scheduled->waketime));
     } else if (!strcmp(name,"pending_race")) {
         begin(DHT22,GPIO('D',2),1); uint8_t b[]={2,146,1,13,162};
-        preamble(); frame(b,27,70); advance(500);
+        preamble(); frame(b,27,70); advance(1500);
         assert(sensor()->phase==DHT_START);
         uint32_t start=sensor()->start_clock;
         advance_ticks(scheduled->waketime-now); // Deliberately starve task.
@@ -490,11 +483,12 @@ class TestDHTFirmware(unittest.TestCase):
 
     def test_production_code(self):
         for scenario in ('formats', 'patterns', 'threshold_jitter',
+                         'watchdog_load', 'bounded_frame',
                          'bad_frames', 'timeouts', 'long_gap_alias',
                          'bad_edges', 'lost_edges',
                          'release_edge', 'release_rise_during_init',
                          'release_rise_at_irq_enable',
-                         'bus_busy', 'pulse_diagnostics', 'lifecycle', 'wrap32',
+                         'bus_busy', 'lifecycle', 'wrap32',
                          'pending_race', 'preserve_registers', 'pcint_filter',
                          'restart_long_idle', 'pullup', 'config_errors'):
             with self.subTest(scenario=scenario):

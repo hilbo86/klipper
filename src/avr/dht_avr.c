@@ -123,7 +123,7 @@ ISR(PCINT0_vect)
     struct dht_gpio *g = receiver;
     if (g && g->pin == GPIO('B', 5) && level != g->level) {
         g->level = level;
-        dht_edge(level, clock);
+        dht_edge(g, level, clock);
     }
 }
 
@@ -134,6 +134,6 @@ ISR(INT0_vect)
     struct dht_gpio *g = receiver;
     if (g && g->pin == GPIO('D', 2) && level != g->level) {
         g->level = level;
-        dht_edge(level, clock);
+        dht_edge(g, level, clock);
     }
 }

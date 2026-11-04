@@ -1,6 +1,6 @@
 # DHT11 / DHT22 auf AVR-Nebencontrollern
 
-Stand: 03.11.2026. Implementierung für den lokalen RF2000-Fork von Klipper.
+Stand: 04.11.2026. Implementierung für den lokalen RF2000-Fork von Klipper.
 Die Software ist offline geprüft. Der Nutzer hat die Nano-Firmwares inzwischen
 installiert und Temperaturmessungen im Dashboard bestätigt. Eine vollständige
 Hardwareabnahme einschließlich Dauerlast und Fehlerfällen steht noch aus.
@@ -38,14 +38,14 @@ sensor_type: DHT11
 sensor_pin: wtrbrd:PB5
 dht_auxiliary_mcu: True
 dht_report_time: 5.0
-dht_max_age: 15.0
+dht_max_age: 90.0
 
 [temperature_sensor druckkammer]
 sensor_type: DHT22
 sensor_pin: curbrd:PD2
 dht_auxiliary_mcu: True
 dht_report_time: 5.0
-dht_max_age: 15.0
+dht_max_age: 30.0
 ```
 
 Nicht in produktive Dateien übernehmen, bevor MCU-Identität, Beschaltung,
@@ -55,7 +55,11 @@ und kein ungeprüfter Ersatz für den externen Widerstand. Invertierung und
 Pull-down sind nicht unterstützt.
 
 Messabstand: DHT11 größer als 1 s, DHT22 größer als 2 s, maximal 120 s.
-`dht_max_age` muss größer als der Messabstand sein. Die Firmware wartet nach
+`dht_max_age` muss größer als der Messabstand sein. Für den RF2000 sind
+90 s beim DHT11 und 30 s beim DHT22 vorgesehen; ohne explizite Option
+bleibt der allgemeine Standard 15 s. Einzelne fehlgeschlagene Messungen
+sind für diese langsamen Umgebungsgrößen akzeptiert. Nach längerem Ausfall
+endet die Gültigkeit weiterhin beim konfigurierten Alterslimit. Die Firmware wartet nach
 Konfiguration mindestens 2 s vor dem ersten Start und verhindert auch bei
 Stop/Restart zu schnelle neue Starts. Eine regelmäßige Messreihe behält
 ihren Zeitraster bei Protokollfehlern bei.
@@ -144,43 +148,9 @@ Für diese Erweiterung sind sowohl der aktualisierte Klipper-Hostadapter
 als auch die angepasste, gebaute Mainsail-Oberfläche zu installieren.
 Für die reine Dashboard-/Konsolenerweiterung ist kein erneutes Flashen nötig.
 
-### Pulsfehler genauer untersuchen
-
-Die neue Empfangskorrektur benötigt dagegen ein Firmwareupdate des betroffenen
-Nanos. Sie initialisiert den Empfangspuffer vor der Busfreigabe und gleicht
-den Pegel nach Aktivierung des IRQ erneut ab. Die Scheduler-Berechnungen
-werden vorgezogen, um die IRQ-Sperrzeit nach Busfreigabe zu verkürzen.
-Pulsgrenzen und Prüfsummenprüfung bleiben unverändert.
-
-Mit dieser Firmware und dem aktualisierten Hostadapter kann der letzte
-Pulsfehler zusätzlich abgefragt werden, beispielsweise für den Sensor
-`temp_ambient`:
-
-```text
-QUERY_DHT SENSOR=temp_ambient DIAGNOSTICS=1
-```
-
-Die normale Statusausgabe enthält dann zusätzlich `last_pulse_error`:
-
-- `phase`: Empfangszustand, etwa `WAIT_HIGH`, `RESPONSE_LOW` oder `BIT_HIGH`.
-- `bits_received`: Anzahl der vor dem Fehler vollständig empfangenen Bits.
-- `duration_us`: Abstand zum vorherigen relevanten Flankenzeitstempel.
-- `level`: gelesener Pegel der beanstandeten Flanke, 0 oder 1.
-- `measurement_clock`: roher 32-Bit-MCU-Zähler des Messbeginns, kein absoluter
-  Zeitstempel; bei 16 MHz läuft dieser nach etwa 268 s über.
-
-Gab es seit der MCU-Konfiguration keinen Pulsfehler, ist das Feld `null`.
-Der letzte Fehler bleibt auch nach erfolgreichen Messungen erhalten; er
-beschreibt nicht zwingend den neuesten Rahmen. Hostzähler können bei einem
-Klippy-Neustart neu beginnen, während diese MCU-Diagnose noch erhalten ist.
-Die gemessenen Abstände enthalten Interruptlatenz und ersetzen keine
-elektrische Messung am DATA-Pin.
-
-Die Diagnose erfasst nur einen kleinen Datensatz beim Fehler. Sie benötigt
-keinen Ringpuffer und sendet keine ungefragten Meldungen. Ohne
-`DIAGNOSTICS=1` verhält sich die Hostabfrage auch mit alter Nano-Firmware
-wie bisher; eine nicht unterstützte Detailabfrage liefert einen verständlichen
-Hinweis auf das erforderliche Firmwareupdate.
+Die Firmware enthält keine Puls-/Timerdiagnose und keine Trace-
+Datensätze. In der Konsole genügt `QUERY_DHT SENSOR=<Name>`;
+dieser Befehl liest ausschließlich den Hoststatus.
 
 Einzelne DHT-Protokollfehler sind normale Statusmeldungen. Ein physischer
 MCU-Ausfall bleibt dagegen Klippers normale MCU-Verbindungsstörung und
@@ -207,10 +177,13 @@ wird einmalig ein OID-Objekt entnommen; pro Messung wird nichts allokiert.
 
 Timer1-Konfiguration und Klippers zentraler Scheduler bleiben unverändert.
 16-Bit-Differenzen erfassen nur kurze Flankenabstände. Ein Scheduler-Guard
-alle 250 µs verwirft Empfangslücken über 200 µs; dadurch können lange Lücken
-nicht nach 4096 µs als kurze gültige Pulse erscheinen. Zusätzlich gilt eine
-32-Bit-Gesamtfrist von 8 ms nach Freigabe. Das setzt wie Klippers übrige
-Timerfunktionen voraus, dass Interrupts rechtzeitig abgearbeitet werden.
+alle 1000 µs verwirft Empfangslücken über 200 µs. Eine fehlende Flanke wird
+damit normalerweise vor dem 4096-µs-Überlauf erkannt. Gegenüber dem alten
+250-µs-Raster entfallen drei Viertel der periodischen Empfangskontrollen.
+Ein zusätzlicher 32-Bit-Gesamtzeitvergleich ist nicht nötig: Die zulässigen
+Phasen ergeben höchstens 160 + 120 + 120 + 40 × (85 + 100) = 7800 µs bis
+zum vollständigen Rahmen. Das setzt wie Klippers übrige Timerfunktionen
+voraus, dass Interrupts rechtzeitig abgearbeitet werden.
 Millisekundenlange fremde IRQ-Sperren sind nicht unterstützt.
 
 | Phase | Akzeptierter Abstand |
@@ -220,6 +193,10 @@ Millisekundenlange fremde IRQ-Sperren sind nicht unterstützt.
 | Antwort LOW und HIGH | jeweils 45–120 µs |
 | Bit LOW | 25–85 µs |
 | Bit HIGH | 10–100 µs; ab 50 µs Bit 1 |
+
+Die experimentelle Sonderbehandlung vor dem DHT11-Prüfsummenbyte
+ist entfernt; der Decoder benötigt im Flankenpfad keine
+sensorabhängige Verzweigung.
 
 Die Grenzen erlauben Jitter, garantieren aber keine Erkennung jedes beliebig
 verfälschten Signals: Die Sensorprüfsumme ist nur acht Bit breit. Eine
@@ -347,10 +324,10 @@ gehört deshalb in die gesondert freizugebende Wartung.
 
 Nach jedem einzelnen Nano zuerst mindestens 100 Zyklen messen, dann einen
 Lauf von mindestens zwei Stunden, bei 5 s etwa 1440 Messungen pro Sensor.
-Ziel bei stabiler Hardware: mindestens 99 % valide Rahmen. Zählerdifferenzen,
-ADC-Werte, alle Ausgänge, CPU-Last und Klippers Log auf `Timer too close`
-oder Shutdowns auswerten. Sensorunterbrechungen nur kontrolliert und gefahrlos
-prüfen. Reale IRQ-Latenz und D13-Pegel sind ausdrücklich noch abzunehmen.
+Messfehler werden für die Umgebungsanzeige toleriert. Entscheidend sind
+ausreichend häufige erfolgreiche Messungen innerhalb von 30 bzw. 90 s
+und unveränderte ADC-/Ausgangsfunktion. Zählerdifferenzen, CPU-Last und
+Klippers Log auf `Timer too close` oder Shutdowns auswerten.
 
 Bei einer Regression zuerst DHT-Abfrage beenden und den sicheren
 Wartungszustand herstellen. Unter gesonderter Freigabe die gesicherten
