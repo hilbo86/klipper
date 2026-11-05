@@ -1,0 +1,257 @@
+"""Laser tool module tests; run without a configuration checkout or Jinja2.
+
+    python -m unittest discover -s test -p test_laser_tool_manager.py
+"""
+import io
+from types import SimpleNamespace
+import unittest
+
+from laser_tool_harness import (
+    Machine, MacroError, MODULE, measured_profile, move, select, start_job)
+
+
+class ToolTests(unittest.TestCase):
+    def test_all_id_windows_exclude_both_boundaries(self):
+        for low, high, expected in MODULE.ID_WINDOWS:
+            with self.subTest(tool=expected):
+                self.assertEqual(MODULE.classify_id((low+high)/2), expected)
+                self.assertEqual(MODULE.classify_id(low), 'UNKNOWN')
+                self.assertEqual(MODULE.classify_id(high), 'UNKNOWN')
+
+    def test_repeated_status_reads_do_not_count_as_new_adc_samples(self):
+        m = Machine()
+        m.objects['analog_input ID'].data['value'] = 59.09
+        for _ in range(10):
+            status = m.tool_manager.get_status(m.now)
+        self.assertEqual(status['stable_samples'], 0)
+        self.assertEqual(status['detected_tool'], 'UNSTABLE')
+        select(m, 59.09)
+        self.assertEqual(m.tool_manager.detected, 'IR_LASER')
+        self.assertFalse(m.tool_manager.granted)
+
+    def test_header_contract_precedes_even_modal_and_macro_commands(self):
+        for header in ('G90\nJOB_START TOOL=BLUE_LASER', 'job_init\nG28',
+                       'M3 S0\nJOB_START TOOL=BLUE_LASER', '; only comment',
+                       'JOB_START TOOL=BLUE_LASER OTHER=1'):
+            with self.subTest(header=header), self.assertRaises(ValueError):
+                MODULE.file_tool(io.StringIO(header))
+        stream = io.StringIO('; export\n\nJOB_START TOOL=IR_LASER ; job\nG1 X1')
+        stream.seek(2)
+        self.assertEqual(MODULE.file_tool(stream), 'IR_LASER')
+        self.assertEqual(stream.tell(), 2)
+
+    def test_all_file_start_paths_hit_preflight(self):
+        for header in ('G1 X10', 'JOB_START TOOL=IR_LASER', 'JOB_START TOOL=DREMEL'):
+            m = Machine()
+            m.sd.current_file = io.StringIO(header)
+            with self.subTest(header=header), self.assertRaises(MacroError):
+                m.sd.do_resume()
+            self.assertFalse(m.sd.active)
+            self.assertFalse(m.tool_manager.granted)
+
+    def test_none_conflict_unknown_and_stale_never_start(self):
+        for value in (31.21, 68.79, 50., 41.82, 0., float('nan')):
+            m = Machine()
+            select(m, value)
+            with self.subTest(value=value), self.assertRaises(MacroError):
+                start_job(m)
+        m = Machine()
+        m.objects['analog_input ID'].mcu_adc.timestamp = .1
+        with self.assertRaises(MacroError):
+            start_job(m)
+
+    def test_manual_and_renamed_output_commands_need_job_grant(self):
+        m = Machine()
+        for command in ('SET_PIN PIN=laser VALUE=.1',
+                        '_SET_PIN PIN=laser VALUE=.1',
+                        'SET_PIN PIN=tool_enable VALUE=1'):
+            with self.subTest(command=command), self.assertRaises(MacroError):
+                m.run(command)
+        m.run('_TOOLS_OFF')
+        self.assertEqual(m.pins['laser']['value'], 0.)
+
+    def test_main_cooling_cannot_be_switched_off_while_power_is_granted(self):
+        m = Machine()
+        m.job()
+        for command in ('SET_FAN_SPEED FAN=water_pump SPEED=0',
+                        'SET_FAN_SPEED FAN=heat_exchanger SPEED=0',
+                        'SET_FAN_SPEED FAN=water_pump TEMPLATE=unsafe'):
+            with self.subTest(command=command), self.assertRaises(MacroError):
+                m.run(command)
+        m.run('_TOOLS_OFF')
+        m.run('SET_FAN_SPEED FAN=water_pump SPEED=0')
+        with self.assertRaises(MacroError):
+            m.run('_TOOL_ARM')
+
+    def test_aux_profiles_require_measurement_and_dremel_requires_cam(self):
+        for tool, value in (('IR_LASER', 59.09), ('DREMEL', 17.58)):
+            m = Machine()
+            select(m, value)
+            with self.subTest(tool=tool), self.assertRaises(MacroError):
+                start_job(m, tool)
+        measured_profile(m, 'DREMEL')
+        with self.assertRaises(MacroError):
+            start_job(m, 'DREMEL')
+
+    def test_id_loss_shutdown_discards_power_and_does_not_rearm(self):
+        for value in (31.21, 68.79, 59.09):
+            m = Machine()
+            m.job()
+            m.objects['analog_input ID'].data['value'] = value
+            m.now += .1
+            m.tool_manager._poll(m.now)
+            self.assertIsNotNone(m.shutdown_message)
+            self.assertTrue(all(pin['value'] == 0 for pin in m.pins.values()))
+            select(m, 82.12)
+            with self.assertRaises(MacroError):
+                m.run('_SET_PIN PIN=laser VALUE=.5')
+
+    def test_stale_id_and_active_temperature_failure_shutdown(self):
+        for failure in ('id_stale', 'temp_stale', 'temp_open', 'reference'):
+            m = Machine()
+            m.job()
+            if failure == 'id_stale':
+                m.objects['analog_input ID'].mcu_adc.timestamp = .01
+            elif failure == 'temp_stale':
+                m.objects['temperature_sensor Laser'].sensor.mcu_adc.timestamp = -.1
+            elif failure == 'temp_open':
+                m.objects['temperature_sensor Laser'].sensor.mcu_adc.value = lambda: 1.
+            else:
+                m.objects['toolhead'].data['homed_axes'] = 'xy'
+            m.tool_manager._poll(m.now)
+            with self.subTest(failure=failure):
+                self.assertIsNotNone(m.shutdown_message)
+                self.assertEqual(m.pins['laser']['value'], 0.)
+
+    def test_inactive_open_temperature_does_not_block_main_job(self):
+        m = Machine()
+        m.objects['temperature_sensor aux_tool'].sensor.mcu_adc.value = lambda: 1.
+        m.job()
+        m.tool_manager._poll(m.now)
+        self.assertIsNone(m.shutdown_message)
+        self.assertEqual(m.tool_manager.get_status(m.now)['valid_temperature_sensors'],
+                         ['temperature_sensor Laser'])
+
+    def test_profile_change_and_sd_resume_bypass_rejected_while_paused(self):
+        m = Machine()
+        m.job()
+        m.run('PAUSE')
+        m.sd.file_position = 100
+        with self.assertRaises(MacroError):
+            m.sd.do_resume()
+        with self.assertRaises(MacroError):
+            m.run('JOB_START TOOL=IR_LASER')
+        m.run('RESUME')
+        self.assertTrue(m.tool_manager.granted)
+
+    def test_sd_pause_and_reset_cannot_leave_a_power_grant(self):
+        m = Machine()
+        m.job()
+        with self.assertRaises(MacroError):
+            m.sd._reset_file()
+        m.run('M25')
+        self.assertFalse(m.tool_manager.granted)
+        self.assertEqual(m.pins['laser']['value'], 0.)
+        self.assertTrue(m.objects['pause_resume'].is_paused)
+        m.run('RESUME')
+        m.sd.do_pause()
+        self.assertFalse(m.tool_manager.granted)
+        self.assertEqual(m.pins['laser']['value'], 0.)
+
+    def test_failed_resume_does_not_leave_a_bypass_token(self):
+        m = Machine()
+        m.job()
+        m.run('PAUSE')
+        m.sd.file_position = 100
+        m.run('AIR_ASSIST_ON')
+        m.run('_TOOL_RESUME_CHECK')
+        m.tool_manager._command_error()
+        with self.assertRaises(MacroError):
+            m.sd.do_resume()
+
+    def test_ir_z_guard_and_profile_bounds_use_machine_positions(self):
+        m = Machine()
+        select(m, 59.09)
+        measured_profile(m, 'IR_LASER')
+        for target in ([10, 10, 37], [251, 10, 38], [10, 241, 38], [4, 10, 38]):
+            with self.subTest(target=target), self.assertRaises(MacroError):
+                m.tool_manager.check_move(move([10, 10, 38], target))
+        with self.assertRaises(MacroError):
+            m.tool_manager.check_move(move([0, 10, 38], [0, 20, 38]))
+        m.tool_manager.check_move(move([10, 10, 38], [20, 20, 38]))
+        m.objects['analog_input ID'].data['value'] = 31.21
+        m.tool_manager._update_id(m.now)
+        with self.assertRaises(MacroError):
+            m.tool_manager.check_move(move([10, 10, 38], [10, 10, 37]))
+
+    def test_ir_power_requires_z_top_and_motor_reference(self):
+        m = Machine()
+        select(m, 59.09)
+        measured_profile(m, 'IR_LASER')
+        m.objects['toolhead'].position[2] = 37.
+        with self.assertRaises(MacroError):
+            start_job(m, 'IR_LASER')
+        self.assertFalse(m.tool_manager.granted)
+
+    def test_job_enters_measured_lower_bounds_before_power_and_rejects_outside_power(self):
+        m = Machine()
+        select(m, 59.09)
+        measured_profile(m, 'IR_LASER')
+        start_job(m, 'IR_LASER')
+        self.assertEqual(m.objects['toolhead'].position[:2], [5., 2.])
+        m.objects['toolhead'].position[0] = 0.
+        with self.assertRaises(MacroError):
+            m.run('_SET_PIN PIN=aux_tool VALUE=.04')
+
+    def test_eof_without_job_finish_revokes_power(self):
+        m = Machine()
+        m.job()
+        m.sd.current_file, m.sd.active = None, False
+        m.tool_manager._poll(m.now)
+        self.assertFalse(m.tool_manager.granted)
+        self.assertIsNone(m.tool_manager.job_tool)
+        self.assertEqual(m.pins['laser']['value'], 0.)
+
+    def test_calibration_preserves_xy_idle_action_and_invalidates_motor_off(self):
+        m = Machine()
+        m.print_stats['state'] = 'standby'
+        idle = m.objects['idle_timeout']
+        original = idle.idle_gcode
+        m.run('TOOL_CALIBRATION_BEGIN')
+        self.assertEqual(idle.idle_gcode, '_TOOLS_OFF')
+        m.run('TOOL_CALIBRATION_ARM TOOL=BLUE_LASER')
+        m.power(20/255)
+        with self.assertRaises(MacroError):
+            m.power(128/255)
+        m.run('TOOL_CALIBRATION_HOLD')
+        self.assertEqual(m.pins['laser']['value'], 0.)
+        with self.assertRaises(MacroError):
+            m.tool_manager.check_move(move([0, 0, 38], [1, 0, 38]))
+        select(m, 59.09)
+        m.tool_manager._home_begin(SimpleNamespace(get_axes=lambda: [2]), [])
+        m.tool_manager._home_end(None, [])
+        m.run('TOOL_CALIBRATION_ARM TOOL=IR_LASER')
+        m.power(20/255)
+        m.run('_TOOLS_OFF')
+        m.tool_manager._motor_off()
+        with self.assertRaises(MacroError):
+            m.run('TOOL_CALIBRATION_ARM TOOL=IR_LASER')
+        m.run('TOOL_CALIBRATION_END')
+        self.assertEqual(idle.idle_gcode, original)
+        self.assertFalse(m.tool_manager.calibrating)
+
+    def test_calibration_expiration_revokes_buffered_power(self):
+        m = Machine()
+        m.print_stats['state'] = 'standby'
+        m.run('TOOL_CALIBRATION_BEGIN')
+        m.run('TOOL_CALIBRATION_ARM TOOL=BLUE_LASER')
+        m.power(20/255)
+        m.now += 10.
+        m.tool_manager._poll(m.now)
+        self.assertIsNotNone(m.shutdown_message)
+        self.assertFalse(m.tool_manager.calibration_valid)
+        self.assertEqual(m.pins['laser']['value'], 0.)
+
+
+if __name__ == '__main__':
+    unittest.main()
