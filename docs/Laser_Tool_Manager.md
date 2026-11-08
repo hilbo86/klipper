@@ -1,4 +1,6 @@
-# Laser tool ID filtering
+# Laser tool manager
+
+## ID filtering
 
 The custom `laser_tool_manager` reads the timestamped MCU ADC reports of
 `analog_input ID`. Motor operation can introduce noise near an ID window
@@ -76,3 +78,47 @@ settles, the buffer should contain five reports and the displayed tool should
 remain stable during the measured motor noise. Confirm NONE and each individual
 tool again. These host tests do not replace the later physical shutdown-latency
 measurement.
+
+## Power-off travel limit measurement
+
+`TOOL_BOUNDS_BEGIN TOOL=<tool> AXIS=X|Y|Z LIMIT=<machine-coordinate>` opens an
+independent measurement session. It requires homed XYZ, a matching stable tool
+ID, no job/pause and no other calibration. It disables both PWMs and tool_enable;
+it never changes G-code offsets or the applied fixed tool correction. IR may
+measure X or Y with Z held at the upper reference; IR Z measurement is rejected.
+
+Optional configuration ceilings `boundary_x_max`, `boundary_y_max` and
+`boundary_z_min` bound the permissible LIMIT. Their defaults are the native
+machine limits. The laser configuration explicitly enables 270 / 298 / -2 mm for
+the first hardware test. These settings do not change normal travel limits.
+
+Only `TOOL_BOUNDS_MOVE POSITION=<absolute-machine-coordinate> SPEED=<mm/s>` may
+move during the session. Each command permits at most 1 mm on the selected axis,
+with speed 0.1 to 10 mm/s. Other axes stay fixed. A pressed measurement button
+permits retreat only. The command uses ordinary Cartesian movement, velocity and
+acceleration checks, temporarily extending only that axis's native limits until
+the individual move has finished. It restores them even on a move error.
+Normal jogging, homing, file starts and calibration power grants are blocked.
+
+The periodic monitor shuts down on changed/invalid ID, lost reference, unexpected
+power, another axis moving, or 60 seconds without another measurement step.
+`TOOL_BOUNDS_END` disables outputs and restores the idle action. Ending beyond
+the original native range additionally clears the homing reference; it never
+pretends the physical position moved. The external script normally retracts
+into the original range before ending. No persistent machine limits change.
+
+`boundary_measurement` exposes tool, axis and the current search interval;
+`boundary_search_limits` exposes the configured ceilings. The companion
+configuration repository owns `scripts/measure-laser-bounds.py` and its tests.
+It searches X_MAX/Y_MAX in the positive direction and Z_MIN in the negative
+direction, with completed moves, settling waits and fresh button queries.
+
+## Measured bounds before tool offsets
+
+`<tool>_bounds_calibrated` defaults to `<tool>_calibrated`. Setting only
+`bounds_calibrated: True` requires the four finite, ordered XY bounds; offsets
+may remain unset and `calibrated` stays false. These bounds then apply to jogging
+and offset-calibration movement. Full calibrated geometry still requires both
+known offsets and measured bounds before a production job can be granted.
+The status field `profile_bounds_calibrated` lets clients display known bounds
+without presenting unknown tool offsets as calibrated.

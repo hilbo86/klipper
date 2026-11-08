@@ -104,7 +104,18 @@ class Toolhead:
                      'axis_minimum': (0., 0., 0.),
                      'axis_maximum': (266., 292., 38.)}
         self.position = [0., 0., 38., 0.]
-        self.kin = SimpleNamespace(check_move=lambda move: None)
+        self.kin = SimpleNamespace(
+            check_move=lambda move: None, limits=[(0., 266.), (0., 292.), (0., 38.)],
+            update_limits=self.update_limits, clear_homing_state=self.clear_homing_state)
+
+    def update_limits(self, index, bounds):
+        if self.kin.limits[index][0] <= self.kin.limits[index][1]:
+            self.kin.limits[index] = bounds
+
+    def clear_homing_state(self, axes):
+        for axis in axes:
+            self.kin.limits['xyz'.index(axis)] = (1., -1.)
+        self.data['homed_axes'] = ''.join(a for a in self.data['homed_axes'] if a not in axes)
 
     def get_status(self, eventtime):
         return self.data
@@ -201,6 +212,11 @@ def attach(host, tool_options=None):
     host.objects['gcode_macro'] = SimpleNamespace(
         load_template=lambda *args: args[-1])
     host.objects['toolhead'] = Toolhead(host)
+    for name in ('X_MAX', 'Y_MAX', 'Z_MIN'):
+        host.objects.setdefault('gcode_button ' + name, Status({'state': 'RELEASED'}))
+    for name, kind in (('laser', 'pwm_tool'), ('aux_tool', 'pwm_tool'),
+                       ('tool_enable', 'output_pin')):
+        host.objects.setdefault(kind + ' ' + name, Status(host.pins[name]))
     host.objects['idle_timeout'].idle_timeout = 600.
     host.objects['idle_timeout'].idle_gcode = 'M84'
     host.objects['pause_resume'].is_paused = False
@@ -221,6 +237,7 @@ def attach(host, tool_options=None):
     host.NEVER = float('inf')
     host.load_object = lambda cfg, name: host.objects[name]
     host.invoke_shutdown = lambda message: shutdown(host, message)
+    host.config_error = host.error
     host.objects['gcode_macro COMPRESSOR_VARS'].variables = host.v
     host.tool_manager = MODULE.LaserToolManager(Config(host, tool_options))
     host.objects['laser_tool_manager'] = host.tool_manager
@@ -262,7 +279,7 @@ def select(machine, value):
 
 def measured_profile(machine, tool):
     machine.tool_manager.profiles[tool].update(
-        calibrated=True, x_min=5., x_max=250., y_min=2., y_max=240.,
+        calibrated=True, bounds_calibrated=True, x_min=5., x_max=250., y_min=2., y_max=240.,
         offset_x=3., offset_y=-7.)
 
 

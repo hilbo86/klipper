@@ -16,6 +16,8 @@ OUTPUTS = {'BLUE_LASER': 'laser', 'IR_LASER': 'aux_tool',
 TEMPERATURES = {'BLUE_LASER': 'temperature_sensor Laser',
                 'IR_LASER': 'temperature_sensor aux_tool',
                 'DREMEL': 'temperature_sensor aux_tool'}
+BOUNDARY_AXES = {'X': (0, 1, 'X_MAX'), 'Y': (1, 1, 'Y_MAX'),
+                 'Z': (2, -1, 'Z_MIN')}
 
 
 def classify_id(value, previous=None, hysteresis=0.):
@@ -80,16 +82,24 @@ class LaserToolManager:
         for tool in TOOLS:
             prefix = tool.lower() + '_'
             calibrated = config.getboolean(prefix + 'calibrated', False)
+            bounds_calibrated = config.getboolean(
+                prefix + 'bounds_calibrated', calibrated)
             # No unmeasured Aux bounds or offsets are inferred.
             values = {key: config.getfloat(prefix + key, None)
                       for key in ('x_min', 'x_max', 'y_min', 'y_max',
                                   'offset_x', 'offset_y')}
-            if calibrated and (None in values.values()
-                               or not all(math.isfinite(value) for value in values.values())
-                               or values['x_min'] >= values['x_max']
-                               or values['y_min'] >= values['y_max']):
+            bounds = [values[key] for key in
+                      ('x_min', 'x_max', 'y_min', 'y_max')]
+            if bounds_calibrated and (None in bounds
+                                      or not all(math.isfinite(v) for v in bounds)
+                                      or values['x_min'] >= values['x_max']
+                                      or values['y_min'] >= values['y_max']):
+                raise config.error('Unvollstaendige Fahrgrenzen fuer ' + tool)
+            if calibrated and (not bounds_calibrated or None in values.values()
+                               or not all(math.isfinite(v) for v in values.values())):
                 raise config.error('Unvollstaendige Geometrie fuer ' + tool)
             values['calibrated'] = calibrated
+            values['bounds_calibrated'] = bounds_calibrated
             values['production_ready'] = config.getboolean(
                 prefix + 'production_ready', tool != 'DREMEL')
             self.profiles[tool] = values
@@ -111,6 +121,12 @@ class LaserToolManager:
         self.calibration_valid = False
         self.calibration_xy = None
         self.saved_idle = None
+        self.boundary = None
+        self.boundary_moving = False
+        self.boundary_limits = {
+            axis: config.getfloat('boundary_' + axis.lower()
+                                  + ('_min' if direction < 0 else '_max'), None)
+            for axis, (index, direction, button) in BOUNDARY_AXES.items()}
         self.homing = False
         self.applied_offset = (0., 0.)
         self.resume_checked = False
@@ -118,7 +134,8 @@ class LaserToolManager:
         for command in ('JOB_START', '_TOOL_ARM', '_TOOL_DISARM',
                         '_TOOL_END', '_TOOL_RESUME_CHECK', 'TOOL_STATUS',
                         'TOOL_CALIBRATION_BEGIN', 'TOOL_CALIBRATION_HOLD',
-                        'TOOL_CALIBRATION_ARM', 'TOOL_CALIBRATION_END'):
+                        'TOOL_CALIBRATION_ARM', 'TOOL_CALIBRATION_END',
+                        'TOOL_BOUNDS_BEGIN', 'TOOL_BOUNDS_MOVE', 'TOOL_BOUNDS_END'):
             self.gcode.register_command(command, getattr(self, 'cmd_' + command),
                                         desc='Laser Werkzeugverwaltung')
         self.printer.register_event_handler('klippy:ready', self._ready)
@@ -138,8 +155,15 @@ class LaserToolManager:
         self.sd = self.printer.lookup_object('virtual_sdcard')
         self.pause = self.printer.lookup_object('pause_resume')
         state = self.toolhead.get_status(self.reactor.monotonic())
+        for axis, (index, direction, button) in BOUNDARY_AXES.items():
+            native = state['axis_maximum' if direction > 0 else 'axis_minimum'][index]
+            limit = self.boundary_limits[axis]
+            if limit is None:
+                self.boundary_limits[axis] = native
+            elif not math.isfinite(limit) or direction * (limit - native) < 0:
+                raise self.printer.config_error('Ungueltige Mess-Suchgrenze fuer ' + axis)
         for tool, profile in self.profiles.items():
-            if profile['calibrated']:
+            if profile['bounds_calibrated']:
                 for axis, index in (('x', 0), ('y', 1)):
                     if not (state['axis_minimum'][index]
                             <= profile[axis + '_min']
@@ -148,6 +172,7 @@ class LaserToolManager:
                         raise self.printer.config_error(
                             'Profil ausserhalb Maschinenfahrbereich: ' + tool)
         kin = self.toolhead.get_kinematics()
+        self.kin = kin
         self.base_check_move = kin.check_move
         kin.check_move = self.check_move
         self.base_sd_resume = self.sd.do_resume
@@ -327,7 +352,7 @@ class LaserToolManager:
 
     def _inside_geometry(self, tool, position):
         p = self.profiles[tool]
-        return not p['calibrated'] or all(
+        return not p['bounds_calibrated'] or all(
             p[axis + '_min'] - 1.e-6 <= position[index] <= p[axis + '_max'] + 1.e-6
             for axis, index in (('x', 0), ('y', 1)))
 
@@ -335,6 +360,11 @@ class LaserToolManager:
         if self.stopped:
             return self.reactor.NEVER
         self._update_id(eventtime)
+        if self.boundary:
+            reason = self._boundary_reason()
+            if reason:
+                self._trip('Grenzvermessung: ' + reason)
+                return self.reactor.NEVER
         if (self.granted and self.calibration_deadline is not None
                 and eventtime >= self.calibration_deadline):
             self._trip('Kalibrierfreigabe abgelaufen; Bezug neu herstellen')
@@ -374,14 +404,15 @@ class LaserToolManager:
         self.stopped = True
         self.granted = False
         self.calibration_valid = False
+        self._clear_boundary()
 
     def _motor_off(self):
         self.calibration_valid = False
-        if self.job_tool or self.granted:
+        if self.job_tool or self.granted or self.boundary:
             self._trip('Referenz durch Motorabschaltung verloren')
 
     def _home_begin(self, homing_state, rails):
-        if self.granted or (self.job_tool and not self.preparing) or (self.calibrating
+        if self.boundary or self.granted or (self.job_tool and not self.preparing) or (self.calibrating
                             and homing_state.get_axes() != [2]):
             raise self.gcode.error('Homing waehrend Freigabe/Kalibrierung gesperrt.')
         self.homing = True
@@ -394,7 +425,7 @@ class LaserToolManager:
         self.resume_checked = False
 
     def _sd_resume(self):
-        if self.calibrating:
+        if self.calibrating or self.boundary:
             raise self.gcode.error('Dateijob waehrend Kalibrierung gesperrt.')
         if self.sd.current_file is None:
             raise self.gcode.error('Keine Jobdatei geladen.')
@@ -455,6 +486,15 @@ class LaserToolManager:
             raise self.gcode.error('Leistung oberhalb Kalibrierlimit.')
 
     def check_move(self, move):
+        if self.boundary:
+            if not self.boundary_moving:
+                raise move.move_error('Grenzvermessung: nur TOOL_BOUNDS_MOVE erlaubt')
+            b = self.boundary
+            if (any(abs(move.axes_d[i]) > 1.e-6 for i in range(3) if i != b['index'])
+                    or abs(move.axes_d[b['index']]) > 1.000001
+                    or not b['minimum'] - 1.e-6 <= move.end_pos[b['index']] <= b['maximum'] + 1.e-6):
+                raise move.move_error('Grenzvermessung: unzulaessige Bewegung')
+            return self.base_check_move(move)
         if not self.homing:
             tool = self.job_tool or (self.candidate if self.candidate in TOOLS
                                      else self.motion_tool)
@@ -466,7 +506,7 @@ class LaserToolManager:
                     raise move.move_error('Kalibrierung: XY-Bezug wird gehalten')
             if tool in self.profiles:
                 p = self.profiles[tool]
-                if p['calibrated']:
+                if p['bounds_calibrated']:
                     if not self._inside_geometry(tool, move.end_pos):
                         raise move.move_error('Werkzeugfahrbereich ' + tool)
                 elif not self.calibrating and any(move.axes_d[:2]):
@@ -485,7 +525,7 @@ class LaserToolManager:
 
     def cmd_JOB_START(self, gcmd):
         tool = gcmd.get('TOOL').upper()
-        if self.calibrating or self.job_tool or self.pause.is_paused:
+        if self.calibrating or self.boundary or self.job_tool or self.pause.is_paused:
             raise gcmd.error('Werkzeugwechsel im laufenden/pausierten Job gesperrt.')
         if not self.sd.is_cmd_from_sd() or tool != self.preflight_tool:
             raise gcmd.error('JOB_START nur als erster gepruefter Dateibefehl.')
@@ -538,6 +578,8 @@ class LaserToolManager:
         gcmd.respond_info(str(self.get_status(self.reactor.monotonic())))
 
     def cmd_TOOL_CALIBRATION_BEGIN(self, gcmd):
+        if self.boundary:
+            raise gcmd.error('Grenzvermessung zuerst beenden.')
         if self.job_tool or self.sd.is_active() or self.pause.is_paused:
             raise gcmd.error('Kalibrierung nur ohne laufenden/pausierten Job.')
         if self.calibrating:
@@ -590,6 +632,116 @@ class LaserToolManager:
         self.calibrating = self.calibration_valid = False
         self.calibration_xy = None
 
+    def _boundary_reason(self):
+        b = self.boundary
+        if self.detected != b['tool']:
+            return 'Werkzeug-ID geaendert/ungueltig'
+        state = self.toolhead.get_status(self.reactor.monotonic())
+        if state['homed_axes'] != 'xyz':
+            return 'Achsenreferenz verloren'
+        if b['tool'] == 'IR_LASER' and not self._z_at_top(state):
+            return 'IR: Z muss oben gehalten sein'
+        if self.reactor.monotonic() > b['deadline']:
+            return 'Messsitzung abgelaufen'
+        for name in ('pwm_tool laser', 'pwm_tool aux_tool', 'output_pin tool_enable'):
+            if self.printer.lookup_object(name).get_status(
+                    self.reactor.monotonic())['value']:
+                return 'Werkzeugleistung muss ausgeschaltet bleiben'
+        position = self.toolhead.get_position()
+        if not b['minimum'] - 1.e-6 <= position[b['index']] <= b['maximum'] + 1.e-6:
+            return 'Messachse ausserhalb Suchbereich'
+        if any(abs(position[i] - b['origin'][i]) > 1.e-6
+               for i in range(3) if i != b['index']):
+            return 'Andere Achse wurde bewegt'
+
+    def cmd_TOOL_BOUNDS_BEGIN(self, gcmd):
+        if (self.boundary or self.calibrating or self.job_tool
+                or self.sd.is_active() or self.pause.is_paused):
+            raise gcmd.error('Grenzvermessung nur ohne Job oder andere Kalibrierung.')
+        tool, axis = gcmd.get('TOOL').upper(), gcmd.get('AXIS').upper()
+        if tool not in TOOLS or axis not in BOUNDARY_AXES:
+            raise gcmd.error('TOOL und AXIS=X/Y/Z erforderlich.')
+        if tool == 'IR_LASER' and axis == 'Z':
+            raise gcmd.error('IR-Laser: keine Z-Grenzvermessung.')
+        self._update_id(self.reactor.monotonic())
+        state = self.toolhead.get_status(self.reactor.monotonic())
+        if self.detected != tool or state['homed_axes'] != 'xyz':
+            raise gcmd.error('Passende stabile ID und XYZ-Referenz erforderlich.')
+        if tool == 'IR_LASER' and not self._z_at_top(state):
+            raise gcmd.error('IR: Z muss oben gehalten sein.')
+        if (not hasattr(self.kin, 'update_limits')
+                or getattr(self.kin, 'dual_carriage_axis', None) is not None):
+            raise gcmd.error('Grenzvermessung erfordert kartesische Kinematik.')
+        index, direction, button = BOUNDARY_AXES[axis]
+        limit = gcmd.get_float('LIMIT')
+        self.toolhead.wait_moves()
+        position = list(self.toolhead.get_position())
+        if not math.isfinite(limit) or direction * (limit - position[index]) <= 0:
+            raise gcmd.error('Endliche Suchgrenze in Suchrichtung erforderlich.')
+        if direction * (limit - self.boundary_limits[axis]) > 1.e-6:
+            raise gcmd.error('Suchgrenze ausserhalb konfiguriertem Messbereich.')
+        self.gcode.run_script_from_command('_TOOLS_OFF')
+        self.toolhead.wait_moves()
+        idle = self.printer.lookup_object('idle_timeout')
+        self.boundary = {
+            'tool': tool, 'axis': axis, 'index': index, 'direction': direction,
+            'button': button, 'limit': limit, 'origin': position,
+            'minimum': min(position[index], limit),
+            'maximum': max(position[index], limit),
+            'original_limits': tuple(self.kin.limits[index]),
+            'idle_gcode': idle.idle_gcode,
+            'deadline': self.reactor.monotonic() + 60.}
+        idle.idle_gcode = self.calibration_idle
+
+    def cmd_TOOL_BOUNDS_MOVE(self, gcmd):
+        if not self.boundary:
+            raise gcmd.error('Keine aktive Grenzvermessung.')
+        self._update_id(self.reactor.monotonic())
+        reason = self._boundary_reason()
+        if reason:
+            raise gcmd.error('Grenzvermessung: ' + reason)
+        b = self.boundary
+        target = gcmd.get_float('POSITION')
+        speed = gcmd.get_float('SPEED', 5., minval=.1, maxval=10.)
+        position = list(self.toolhead.get_position())
+        delta = target - position[b['index']]
+        if (not math.isfinite(target) or not math.isfinite(speed)
+                or not b['minimum'] - 1.e-6 <= target <= b['maximum'] + 1.e-6
+                or abs(delta) > 1.000001):
+            raise gcmd.error('Grenzvermessung: maximal 1 mm je Schritt innerhalb Suchbereich.')
+        pressed = self.printer.lookup_object('gcode_button ' + b['button']).get_status(
+            self.reactor.monotonic())['state'] == 'PRESSED'
+        if pressed and delta * b['direction'] > 1.e-6:
+            raise gcmd.error('Grenztaster ausgeloest: nur Rueckzug erlaubt.')
+        limits = self.kin.limits[b['index']]
+        extended = (min(limits[0], b['minimum']), max(limits[1], b['maximum']))
+        target_position = list(position)
+        target_position[b['index']] = target
+        self.boundary_moving = True
+        try:
+            self.kin.update_limits(b['index'], extended)
+            self.toolhead.manual_move(target_position, speed)
+            self.toolhead.wait_moves()
+            b['deadline'] = self.reactor.monotonic() + 60.
+        finally:
+            self.kin.update_limits(b['index'], limits)
+            self.boundary_moving = False
+
+    def _clear_boundary(self):
+        if self.boundary:
+            self.printer.lookup_object('idle_timeout').idle_gcode = self.boundary['idle_gcode']
+            self.boundary = None
+
+    def cmd_TOOL_BOUNDS_END(self, gcmd):
+        self.gcode.run_script_from_command('_TOOLS_OFF')
+        self.toolhead.wait_moves()
+        if self.boundary:
+            b = self.boundary
+            position = self.toolhead.get_position()[b['index']]
+            if not b['original_limits'][0] <= position <= b['original_limits'][1]:
+                self.kin.clear_homing_state('xyz')
+            self._clear_boundary()
+
     def get_status(self, eventtime):
         self._update_id(eventtime)
         tool = self.detected if self.detected in TOOLS else None
@@ -604,6 +756,7 @@ class LaserToolManager:
                 'id_sample_age': self.id_age, 'stable_samples': self.samples,
                 'requested_tool': self.job_tool, 'power_granted': self.granted,
                 'profile_calibrated': bool(profile and profile['calibrated']),
+                'profile_bounds_calibrated': bool(profile and profile['bounds_calibrated']),
                 'geometry': profile, 'blocked_reasons': reasons,
                 'temperature_sensors': temperature,
                 'valid_temperature_sensors': temperature if tool and
@@ -613,6 +766,10 @@ class LaserToolManager:
                 'z_at_top': self._z_at_top(self.toolhead.get_status(eventtime)),
                 'calibrating': self.calibrating,
                 'calibration_valid': self.calibration_valid,
+                'boundary_measurement': ({key: self.boundary[key] for key in
+                    ('tool', 'axis', 'limit', 'minimum', 'maximum')}
+                    if self.boundary else None),
+                'boundary_search_limits': dict(self.boundary_limits),
                 'available_controls': ([OUTPUTS[tool], 'crosshair', 'Y_Laser']
                     + (['air_assist', 'Steckdose_4', 'water_pump',
                         'heat_exchanger', 'tank_licht', 'uv_disinfector']

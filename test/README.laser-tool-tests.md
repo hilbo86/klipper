@@ -7,11 +7,13 @@ The tool manager's unit tests and host doubles are owned by Klipper:
   calibration lifecycle. Includes median filtering, hysteresis, motor-noise
   regression cases, reacquisition and immediate raw-value fault handling.
 - `laser_tool_harness.py`: synthetic host, ADC, pin, fan and motion interfaces.
+- `test_laser_tool_bounds.py`: power-off measurement sessions, one-axis steps,
+  temporary Cartesian limits, interlocks and bounds before offset calibration.
 
 From the Klipper checkout, run:
 
 ```sh
-python -m unittest discover -s test -p test_laser_tool_manager.py
+python -m unittest discover -s test -p 'test_laser_tool*.py'
 ```
 
 These tests need only Python's standard library. They do not read or copy
@@ -23,7 +25,7 @@ ID filter options, status fields and timing are described in
 [`docs/Laser_Tool_Manager.md`](../docs/Laser_Tool_Manager.md).
 
 The `Klipper_config` repository owns the integration tests for its compressor,
-job, power and parking macros, and the tests for its Y-Max measurement script.
+job, power and parking macros, and the tests for its X/Y/Z measurement script.
 Those tests load the real configuration and use the shared doubles from this
 Klipper checkout. Their command, from `Klipper_config`, is:
 
