@@ -4,7 +4,8 @@ The tool manager's unit tests and host doubles are owned by Klipper:
 
 - `test_laser_tool_manager.py`: ID stability and freshness, file preflight,
   output interlocks, shutdown, movement limits, pause/resume admission and
-  calibration lifecycle.
+  calibration lifecycle. Includes median filtering, hysteresis, motor-noise
+  regression cases, reacquisition and immediate raw-value fault handling.
 - `laser_tool_harness.py`: synthetic host, ADC, pin, fan and motion interfaces.
 
 From the Klipper checkout, run:
@@ -13,10 +14,13 @@ From the Klipper checkout, run:
 python -m unittest discover -s test -p test_laser_tool_manager.py
 ```
 
-These 20 tests need only Python's standard library. They do not read or copy
+These tests need only Python's standard library. They do not read or copy
 printer configuration files and do not require Jinja2 or a neighbouring
 configuration checkout. Macro callbacks are external host interfaces in this
 suite; the printer's actual macro behavior is tested separately.
+
+ID filter options, status fields and timing are described in
+[`docs/Laser_Tool_Manager.md`](../docs/Laser_Tool_Manager.md).
 
 The `Klipper_config` repository owns the integration tests for its compressor,
 job, power and parking macros, and the tests for its Y-Max measurement script.

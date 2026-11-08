@@ -21,9 +21,11 @@ class ToolTests(unittest.TestCase):
     def test_repeated_status_reads_do_not_count_as_new_adc_samples(self):
         m = Machine()
         m.objects['analog_input ID'].data['value'] = 59.09
+        m.now += .1
         for _ in range(10):
             status = m.tool_manager.get_status(m.now)
         self.assertEqual(status['stable_samples'], 0)
+        self.assertEqual(status['id_filter_samples'], 1)
         self.assertEqual(status['detected_tool'], 'UNSTABLE')
         select(m, 59.09)
         self.assertEqual(m.tool_manager.detected, 'IR_LASER')
@@ -251,6 +253,172 @@ class ToolTests(unittest.TestCase):
         self.assertIsNotNone(m.shutdown_message)
         self.assertFalse(m.tool_manager.calibration_valid)
         self.assertEqual(m.pins['laser']['value'], 0.)
+
+
+class IdFilterTests(unittest.TestCase):
+    @staticmethod
+    def report(machine, value, poll=False):
+        machine.objects['analog_input ID'].data['value'] = value
+        machine.now += .1
+        manager = machine.tool_manager
+        if poll:
+            manager._poll(machine.now)
+        return manager.get_status(machine.now)
+
+    def test_measured_motor_noise_range_preserves_active_job(self):
+        m = Machine()
+        m.job()
+        for value in [80., 79.11, 81.1, 79.2, 78.9, 80.6] * 10:
+            status = self.report(m, value, poll=True)
+            self.assertEqual(status['detected_tool'], 'BLUE_LASER')
+            self.assertTrue(status['power_granted'])
+            self.assertIsNone(m.shutdown_message)
+
+    def test_main_acquires_across_measured_range_without_previous_recognition(self):
+        for value in (78.9, 79.11, 80., 81.1):
+            with self.subTest(value=value):
+                m = Machine(id_value=value)
+                self.assertEqual(m.tool_manager.detected, 'BLUE_LASER')
+                m.job()
+                self.report(m, value, poll=True)
+                self.assertIsNone(m.shutdown_message)
+                self.assertTrue(m.tool_manager.granted)
+
+    def test_median_rejects_two_in_band_outliers_and_reports_raw_value(self):
+        m = Machine(id_value=80.)
+        for value in (80., 82.9, 82.8, 80., 80.):
+            status = self.report(m, value)
+            self.assertAlmostEqual(status['id_value'], value)
+            self.assertAlmostEqual(status['id_filtered_value'], 80.)
+            self.assertEqual(status['id_filter_samples'], 5)
+            self.assertEqual(status['id_filter_size'], 5)
+
+    def test_hysteresis_holds_each_tool_at_both_boundaries(self):
+        for low, high, tool in MODULE.ID_WINDOWS:
+            if tool not in MODULE.TOOLS:
+                continue
+            for value in (low - .1, high + .1):
+                with self.subTest(tool=tool, value=value):
+                    m = Machine(id_value=(low + high) / 2)
+                    select(m, value)
+                    self.assertEqual(m.tool_manager.detected, tool)
+
+    def test_hysteresis_does_not_widen_initial_acquisition(self):
+        for low, high, tool in MODULE.ID_WINDOWS:
+            if tool not in MODULE.TOOLS:
+                continue
+            for value in (low - .1, high + .1):
+                with self.subTest(tool=tool, value=value):
+                    m = Machine(id_value=value)
+                    select(m, value)
+                    self.assertEqual(m.tool_manager.detected, 'UNKNOWN')
+                    self.assertFalse(m.tool_manager.granted)
+
+    def test_zero_hysteresis_preserves_strict_exit_threshold(self):
+        m = Machine(tool_options={'id_hysteresis': 0.})
+        m.job()
+        self.report(m, 76.99, poll=True)
+        self.assertIsNotNone(m.shutdown_message)
+        self.assertFalse(m.tool_manager.granted)
+
+    def test_noisy_acquisition_needs_full_window_and_three_new_medians(self):
+        m = Machine(id_value=0.)
+        reports = (76.99, 77.01, 76.97, 77.02, 77.03, 77.04, 76.96)
+        for value in reports[:-1]:
+            status = self.report(m, value)
+            self.assertEqual(status['detected_tool'], 'UNSTABLE')
+        status = self.report(m, reports[-1])
+        self.assertEqual(status['detected_tool'], 'BLUE_LASER')
+        self.assertEqual(status['stable_samples'], 3)
+        self.assertAlmostEqual(status['id_filtered_value'], 77.02)
+
+    def test_raw_escape_revokes_active_power_on_first_report(self):
+        for value in (76.49, 83.51, 31.21, 68.79, 50., 41.82,
+                      59.09, 17.58, 0., 100., float('nan'), float('inf')):
+            with self.subTest(value=value):
+                m = Machine()
+                m.job()
+                self.report(m, value, poll=True)
+                self.assertIsNotNone(m.shutdown_message)
+                self.assertFalse(m.tool_manager.granted)
+                self.assertTrue(all(pin['value'] == 0 for pin in m.pins.values()))
+
+    def test_direct_power_guard_observes_escape_before_periodic_poll(self):
+        m = Machine()
+        m.job()
+        m.objects['analog_input ID'].data['value'] = 76.49
+        m.now += .1
+        with self.assertRaises(MacroError):
+            m.power(.1)
+        self.assertEqual(m.tool_manager.detected, 'UNSTABLE')
+
+    def test_tool_change_refills_filter_without_synthetic_intermediate_id(self):
+        m = Machine()
+        for _ in range(6):
+            status = self.report(m, 59.09)
+            self.assertEqual(status['detected_tool'], 'UNSTABLE')
+            self.assertAlmostEqual(status['id_filtered_value'], 59.09)
+        status = self.report(m, 59.09)
+        self.assertEqual(status['detected_tool'], 'IR_LASER')
+        self.assertTrue(status['ir_z_locked'])
+
+    def test_alternating_tools_never_form_a_filtered_tool_or_conflict_id(self):
+        m = Machine()
+        for value in (59.09, 82.12) * 10:
+            status = self.report(m, value)
+            self.assertEqual(status['detected_tool'], 'UNSTABLE')
+            self.assertAlmostEqual(status['id_filtered_value'], value)
+            self.assertEqual(status['id_filter_samples'], 1)
+
+    def test_stale_id_clears_filter_and_requires_full_reacquisition(self):
+        m = Machine()
+        adc = m.objects['analog_input ID'].mcu_adc
+        adc.timestamp = adc.get_last_value()[0]
+        m.now += .7
+        status = m.tool_manager.get_status(m.now)
+        self.assertEqual(status['detected_tool'], 'STALE')
+        self.assertIsNone(status['id_filtered_value'])
+        self.assertEqual(status['id_filter_samples'], 0)
+        adc.timestamp = None
+        for _ in range(6):
+            status = self.report(m, 82.12)
+            self.assertEqual(status['detected_tool'], 'UNSTABLE')
+        status = self.report(m, 82.12)
+        self.assertEqual(status['detected_tool'], 'BLUE_LASER')
+
+    def test_report_gap_does_not_reuse_old_filter_history(self):
+        m = Machine()
+        m.now += 1.
+        status = m.tool_manager.get_status(m.now)
+        self.assertEqual(status['detected_tool'], 'UNSTABLE')
+        self.assertEqual(status['id_filter_samples'], 1)
+        self.assertEqual(status['stable_samples'], 0)
+
+    def test_stale_recovery_cannot_reuse_previous_hysteresis(self):
+        m = Machine()
+        adc = m.objects['analog_input ID'].mcu_adc
+        adc.timestamp = adc.get_last_value()[0]
+        m.now += .7
+        self.assertEqual(m.tool_manager.get_status(m.now)['detected_tool'], 'STALE')
+        adc.timestamp = None
+        select(m, 76.9)
+        self.assertEqual(m.tool_manager.detected, 'UNKNOWN')
+
+    def test_timestamp_regression_and_future_report_are_invalid(self):
+        for delta in (-.1, 1.):
+            with self.subTest(delta=delta):
+                m = Machine()
+                adc = m.objects['analog_input ID'].mcu_adc
+                adc.timestamp = adc.get_last_value()[0] + delta
+                status = m.tool_manager.get_status(m.now)
+                self.assertEqual(status['detected_tool'], 'STALE')
+                self.assertEqual(status['id_filter_samples'], 0)
+
+    def test_filter_rejects_even_window_and_nonfinite_hysteresis(self):
+        for options in ({'id_filter_samples': 4},
+                        {'id_hysteresis': float('nan')}):
+            with self.subTest(options=options), self.assertRaises(MacroError):
+                Machine(tool_options=options)
 
 
 if __name__ == '__main__':

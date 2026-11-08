@@ -86,14 +86,15 @@ class ADC:
         self.timestamp = None
 
     def get_last_value(self):
-        timestamp = self.host.now + 1 if self.timestamp is None else self.timestamp
+        timestamp = (self.estimated_print_time(self.host.now)
+                     if self.timestamp is None else self.timestamp)
         return timestamp, self.value()
 
     def get_mcu(self):
         return self
 
     def estimated_print_time(self, eventtime):
-        return eventtime + 1
+        return eventtime + 10
 
 
 class Toolhead:
@@ -224,9 +225,14 @@ def attach(host, tool_options=None):
     host.tool_manager = MODULE.LaserToolManager(Config(host, tool_options))
     host.objects['laser_tool_manager'] = host.tool_manager
     host.tool_manager._ready()
-    host.tool_manager.candidate = 'BLUE_LASER'
-    host.tool_manager.samples = 3
-    host.tool_manager._update_id(host.now)
+    # Warm up real reports before the timing tests' zero point.
+    manager = host.tool_manager
+    start = host.now
+    for remaining in reversed(range(manager.id_filter_size
+                                    + manager.stable_samples - 1)):
+        host.now = start - remaining * .1
+        manager._update_id(host.now)
+    host.now = start
 
 
 def shutdown(host, message):
@@ -248,9 +254,10 @@ def start_job(host, tool='BLUE_LASER'):
 
 def select(machine, value):
     machine.objects['analog_input ID'].data['value'] = value
-    for _ in range(3):
+    manager = machine.tool_manager
+    for _ in range(manager.id_filter_size + manager.stable_samples - 1):
         machine.now += .1
-        machine.tool_manager._update_id(machine.now)
+        manager._update_id(machine.now)
 
 
 def measured_profile(machine, tool):
@@ -272,7 +279,7 @@ class Machine:
     This host does not reproduce the printer's compressor or job macro logic.
     The configuration repository executes those real Jinja macros separately.
     """
-    def __init__(self):
+    def __init__(self, tool_options=None, id_value=80.):
         self.now = 0.
         self.events = []
         self.variables = {'COMPRESSOR_VARS': {
@@ -284,17 +291,18 @@ class Machine:
                                    'filename': 'laser.gcode'}),
             'idle_timeout': Status({'state': 'Printing'}),
             'pause_resume': Status({'is_paused': False}),
-            'analog_input ID': Status({'value': 82.12}),
+            'analog_input ID': Status({'value': id_value}),
             'gcode_button deckelklappe': Status({'state': 'RELEASED'}),
         }
         self.pins = {name: {'value': 0.} for name in (
             'laser', 'aux_tool', 'tool_enable', 'Steckdose_4', 'air_assist')}
         self.fans = {}
-        attach(self)
+        attach(self, tool_options)
         # Periphery readiness is fixture input to module tests. Its actual
         # preparation is checked against the real configuration macros.
-        self.run('START_CLEANING')
-        self.run('AIR_ASSIST_ON')
+        if self.tool_manager.detected == 'BLUE_LASER':
+            self.run('START_CLEANING')
+            self.run('AIR_ASSIST_ON')
 
     @property
     def v(self):

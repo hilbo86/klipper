@@ -1,11 +1,13 @@
 # Central tool interlocks for the laser. Distributed under GNU GPLv3.
 import math
 import re
+from collections import deque
 
 
 TOOLS = ('BLUE_LASER', 'IR_LASER', 'DREMEL')
 ID_WINDOWS = (
-    (79.12, 85.12, 'BLUE_LASER'), (56.09, 62.09, 'IR_LASER'),
+    # Main ID measured at 80%; preserve the original +/-3 point tolerance.
+    (77.00, 83.00, 'BLUE_LASER'), (56.09, 62.09, 'IR_LASER'),
     (14.58, 20.58, 'DREMEL'), (65.79, 71.79, 'BLUE_LASER+IR_LASER'),
     (47.00, 53.00, 'BLUE_LASER+DREMEL'),
     (38.82, 44.82, 'IR_LASER+DREMEL'), (28.21, 34.21, 'NONE'))
@@ -16,9 +18,10 @@ TEMPERATURES = {'BLUE_LASER': 'temperature_sensor Laser',
                 'DREMEL': 'temperature_sensor aux_tool'}
 
 
-def classify_id(value):
+def classify_id(value, previous=None, hysteresis=0.):
     for low, high, name in ID_WINDOWS:
-        if low < value < high:
+        margin = hysteresis if name == previous else 0.
+        if low - margin < value < high + margin:
             return name
     return 'UNKNOWN'
 
@@ -52,6 +55,14 @@ class LaserToolManager:
         self.gcode = self.printer.lookup_object('gcode')
         self.id_name = config.get('id_input', 'analog_input ID')
         self.stable_samples = config.getint('stable_samples', 3, minval=2)
+        self.id_filter_size = config.getint(
+            'id_filter_samples', 5, minval=1, maxval=9)
+        if self.id_filter_size % 2 != 1:
+            raise config.error('id_filter_samples muss ungerade sein.')
+        self.id_hysteresis = config.getfloat(
+            'id_hysteresis', .5, minval=0., maxval=1.)
+        if not math.isfinite(self.id_hysteresis):
+            raise config.error('id_hysteresis muss endlich sein.')
         self.max_age = config.getfloat('max_sample_age', .6, above=0.)
         self.interval = config.getfloat('poll_interval', .1, above=0.)
         self.temp_max_age = config.getfloat('temperature_max_age', 1., above=0.)
@@ -87,6 +98,8 @@ class LaserToolManager:
         self.samples = 0
         self.last_sample = None
         self.id_value = self.id_age = None
+        self.id_filtered_value = None
+        self.id_samples = deque(maxlen=self.id_filter_size)
         self.job_tool = None
         self.job_file = None
         self.preflight_tool = None
@@ -190,20 +203,57 @@ class LaserToolManager:
 
     def _update_id(self, eventtime):
         timestamp, raw, age = self._read_adc(self.id_sensor.mcu_adc, eventtime)
-        self.id_value = raw * self.id_sensor.scale + self.id_sensor.offset
-        self.id_age = max(age, 0.)
+        value = raw * self.id_sensor.scale + self.id_sensor.offset
+        self.id_value = value if math.isfinite(value) else None
+        self.id_age = max(age, 0.) if math.isfinite(age) else None
         fresh = timestamp > 0 and -.1 <= age <= self.max_age
-        candidate = classify_id(self.id_value) if fresh else 'STALE'
+        if not fresh or (self.last_sample is not None
+                         and timestamp < self.last_sample):
+            self.id_samples.clear()
+            self.id_filtered_value = None
+            self.candidate = self.detected = 'STALE'
+            self.samples = 0
+            return
+        if timestamp == self.last_sample:
+            return
+        if (self.last_sample is not None
+                and timestamp - self.last_sample > self.max_age):
+            self.id_samples.clear()
+            self.candidate = 'UNKNOWN'
+            self.detected = 'UNSTABLE'
+            self.samples = 0
+        self.last_sample = timestamp
+        if self.id_value is None or not 0. < raw < 1.:
+            self.id_samples.clear()
+            self.id_filtered_value = None
+            self.candidate = self.detected = 'UNKNOWN'
+            self.samples = 0
+            return
+
+        # Retain an established class near its boundaries, but acquire new
+        # classes only inside the acquisition windows. Never average a real tool
+        # change into a third resistor ID or delay revocation behind the filter.
+        held = self.detected
+        anchor = self.candidate
+        if anchor in ('UNKNOWN', 'STALE'):
+            anchor = classify_id(value)
+        if anchor != 'UNKNOWN' and (
+                classify_id(value, anchor, self.id_hysteresis) != anchor
+                or any(classify_id(sample, anchor, self.id_hysteresis) != anchor
+                       for sample in self.id_samples)):
+            self.id_samples.clear()
+        self.id_samples.append(value)
+        ordered = sorted(self.id_samples)
+        self.id_filtered_value = ordered[len(ordered) // 2]
+        candidate = classify_id(self.id_filtered_value, held, self.id_hysteresis)
         if candidate != self.candidate:
             self.candidate, self.samples = candidate, 0
-            self.detected = 'UNSTABLE'
-        if fresh and timestamp != self.last_sample:
-            self.samples += 1
-            self.last_sample = timestamp
-        if not fresh:
+        if len(self.id_samples) < self.id_filter_size:
             self.samples = 0
-            self.detected = 'STALE'
-        elif self.samples >= self.stable_samples:
+        else:
+            self.samples += 1
+        self.detected = 'UNSTABLE'
+        if self.samples >= self.stable_samples:
             self.detected = candidate
             if candidate in TOOLS:
                 self.motion_tool = candidate
@@ -548,6 +598,9 @@ class LaserToolManager:
         temperature = ([TEMPERATURES[tool]] if tool and
                        (tool != 'DREMEL' or self.dremel_sensor) else [])
         return {'detected_tool': self.detected, 'id_value': self.id_value,
+                'id_filtered_value': self.id_filtered_value,
+                'id_filter_samples': len(self.id_samples),
+                'id_filter_size': self.id_filter_size,
                 'id_sample_age': self.id_age, 'stable_samples': self.samples,
                 'requested_tool': self.job_tool, 'power_granted': self.granted,
                 'profile_calibrated': bool(profile and profile['calibrated']),
