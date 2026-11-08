@@ -10,7 +10,8 @@ The tool manager's unit tests and host doubles are owned by Klipper:
 - `laser_tool_harness.py`: synthetic host, ADC, pin, fan and motion interfaces.
 - `test_laser_tool_bounds.py`: power-off measurement sessions, one-axis steps,
   temporary Cartesian limits, interlocks, isolated ID spikes during movement,
-  confirmed ID loss and bounds before offset calibration.
+  confirmed ID loss, one-time X/Y approaches at normal positioning speed,
+  early-trigger monitoring and bounds before offset calibration.
 
 From the Klipper checkout, run:
 

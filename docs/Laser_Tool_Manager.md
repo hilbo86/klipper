@@ -114,8 +114,19 @@ Optional configuration ceilings `boundary_x_max`, `boundary_y_max` and
 machine limits. The laser configuration explicitly enables 270 / 298 / -2 mm for
 the first hardware test. These settings do not change normal travel limits.
 
-Only `TOOL_BOUNDS_MOVE POSITION=<absolute-machine-coordinate> SPEED=<mm/s>` may
-move during the session. Each command permits at most 1 mm on the selected axis,
+Before the first measurement step, optional
+`TOOL_BOUNDS_APPROACH POSITION=<absolute-machine-coordinate>` permits one X/Y
+approach within the original native limits and the chosen search interval. It
+uses `positioning_speed` (default 20 mm/s), capped by the current velocity limit,
+and ordinary Cartesian acceleration checks. It never extends native limits or
+changes another axis. Z and repeating an approach after any measurement step
+are rejected. The button must be released; the host monitor shuts down on a
+trigger during approach. This remains a host-monitored positioning move, not an
+MCU endstop homing move. Status `boundary_approach_supported` advertises support.
+
+After that, only
+`TOOL_BOUNDS_MOVE POSITION=<absolute-machine-coordinate> SPEED=<mm/s>`
+may move during the session. Each command permits at most 1 mm on the selected axis,
 with speed 0.1 to 10 mm/s. Other axes stay fixed. A pressed measurement button
 permits retreat only. The command uses ordinary Cartesian movement, velocity and
 acceleration checks, temporarily extending only that axis's native limits until
@@ -134,6 +145,12 @@ into the original range before ending. No persistent machine limits change.
 configuration repository owns `scripts/measure-laser-bounds.py` and its tests.
 It searches X_MAX/Y_MAX in the positive direction and Z_MIN in the negative
 direction, with completed moves, settling waits and fresh button queries.
+The optional `--start-offset` starts the slow X/Y search at native maximum minus
+the supplied positive offset, approached with `TOOL_BOUNDS_APPROACH`; Z does not
+support it. After each coarse or fine trigger the script retreats 1 mm, checks
+the button, and if necessary retreats a second 1 mm before failing. Retraction
+never crosses the homing end. Reports keep the fine forward trigger interval
+separate from the released retraction and final machine positions.
 
 ## Measured bounds before tool offsets
 

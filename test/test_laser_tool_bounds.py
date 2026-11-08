@@ -51,6 +51,82 @@ class BoundaryTests(unittest.TestCase):
         m.run('TOOL_BOUNDS_MOVE POSITION=1')
         self.assertEqual(m.objects['toolhead'].position[:3], [0., 1., 38.])
 
+    def test_approach_uses_positioning_speed_and_preserves_normal_limits(self):
+        for tool, axis, target in (('BLUE_LASER', 'X', 251.),
+                                   ('BLUE_LASER', 'Y', 277.),
+                                   ('IR_LASER', 'Y', 192.), ('DREMEL', 'Y', 192.)):
+            with self.subTest(tool=tool, axis=axis):
+                m = self.machine(tool)
+                head = m.objects['toolhead']
+                original = list(head.kin.limits)
+                m.run('TOOL_BOUNDS_BEGIN TOOL=%s AXIS=%s LIMIT=%d'
+                      % (tool, axis, 270 if axis == 'X' else 298))
+                m.run('TOOL_BOUNDS_APPROACH POSITION=%s' % target)
+                self.assertEqual(head.moves[-1][1], 20.)
+                self.assertEqual(head.position['XYZ'.index(axis)], target)
+                self.assertEqual(head.kin.limits, original)
+                self.assertEqual(head.position[2], 38.)
+                self.assertFalse(m.tool_manager.boundary_approaching)
+                with self.assertRaises(MacroError):
+                    m.run('TOOL_BOUNDS_APPROACH POSITION=%s' % target)
+                with self.assertRaises(MacroError):
+                    m.run('TOOL_BOUNDS_MOVE POSITION=%s' % (target + 2))
+                m.run('TOOL_BOUNDS_MOVE POSITION=%s SPEED=5' % (target + 1))
+                self.assertEqual(head.moves[-1][1], 5.)
+
+    def test_approach_respects_lower_current_velocity_limit(self):
+        m = self.machine()
+        head = m.objects['toolhead']
+        head.data['max_velocity'] = 10.
+        m.run('TOOL_BOUNDS_BEGIN TOOL=BLUE_LASER AXIS=X LIMIT=270')
+        m.run('TOOL_BOUNDS_APPROACH POSITION=251')
+        self.assertEqual(head.moves[-1][1], 10.)
+
+    def test_approach_rejects_z_outside_native_range_and_after_search(self):
+        for fault in ('Z', 'outside', 'negative', 'nonfinite', 'after_step', 'pressed'):
+            with self.subTest(fault=fault):
+                m = self.machine()
+                axis = 'Z' if fault == 'Z' else 'X'
+                m.run('TOOL_BOUNDS_BEGIN TOOL=BLUE_LASER AXIS=%s LIMIT=%d'
+                      % (axis, -2 if axis == 'Z' else 270))
+                if fault == 'after_step':
+                    m.run('TOOL_BOUNDS_MOVE POSITION=1')
+                elif fault == 'pressed':
+                    m.objects['gcode_button X_MAX'].data['state'] = 'PRESSED'
+                target = {'outside': '267', 'negative': '-1', 'nonfinite': 'nan'}.get(fault, '251')
+                moves_before = len(m.objects['toolhead'].moves)
+                with self.assertRaises(MacroError):
+                    m.run('TOOL_BOUNDS_APPROACH POSITION=' + target)
+                self.assertEqual(len(m.objects['toolhead'].moves), moves_before)
+                self.assertFalse(m.tool_manager.boundary_approaching)
+
+    def test_approach_monitor_trips_on_early_trigger_and_keeps_limits(self):
+        m = self.machine()
+        head = m.objects['toolhead']
+        m.run('TOOL_BOUNDS_BEGIN TOOL=BLUE_LASER AXIS=X LIMIT=270')
+        def trigger_during_wait():
+            m.objects['gcode_button X_MAX'].data['state'] = 'PRESSED'
+            m.tool_manager._poll(m.now)
+        head.wait_moves = trigger_during_wait
+        with self.assertRaises(MacroError):
+            m.run('TOOL_BOUNDS_APPROACH POSITION=251')
+        self.assertIn('Grenztaster vor Suchstart', m.shutdown_message)
+        self.assertEqual(head.kin.limits[0], (0., 266.))
+        self.assertFalse(m.tool_manager.boundary_approaching)
+        self.assertIsNone(m.tool_manager.boundary)
+
+    def test_failed_approach_restores_motion_guard(self):
+        m = self.machine()
+        head = m.objects['toolhead']
+        m.run('TOOL_BOUNDS_BEGIN TOOL=BLUE_LASER AXIS=X LIMIT=270')
+        def fail(motion):
+            raise MacroError('native move failed')
+        m.tool_manager.base_check_move = fail
+        with self.assertRaisesRegex(MacroError, 'native'):
+            m.run('TOOL_BOUNDS_APPROACH POSITION=251')
+        self.assertFalse(m.tool_manager.boundary_approaching)
+        self.assertEqual(head.kin.limits[0], (0., 266.))
+
     def test_trigger_allows_retreat_but_never_forward(self):
         m = self.machine()
         m.run('TOOL_BOUNDS_BEGIN TOOL=BLUE_LASER AXIS=Y LIMIT=298')

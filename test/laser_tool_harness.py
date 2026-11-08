@@ -106,8 +106,9 @@ class Toolhead:
         self.host = host
         self.data = {'estimated_print_time': 0., 'homed_axes': 'xyz',
                      'axis_minimum': (0., 0., 0.),
-                     'axis_maximum': (266., 292., 38.)}
+                     'axis_maximum': (266., 292., 38.), 'max_velocity': 150.}
         self.position = [0., 0., 38., 0.]
+        self.moves = []
         self.kin = SimpleNamespace(
             check_move=lambda move: None, limits=[(0., 266.), (0., 292.), (0., 38.)],
             update_limits=self.update_limits, clear_homing_state=self.clear_homing_state)
@@ -130,6 +131,9 @@ class Toolhead:
     def get_kinematics(self):
         return self.kin
 
+    def get_max_velocity(self):
+        return self.data['max_velocity'], 1200.
+
     def wait_moves(self):
         self.host.events.append(('wait_moves', None))
 
@@ -143,6 +147,7 @@ class Toolhead:
             end_pos=end, axes_d=delta, move_error=self.host.error))
         assert not self.host.tool_manager.granted
         self.position = end
+        self.moves.append((list(end), speed))
 
 
 class SD:

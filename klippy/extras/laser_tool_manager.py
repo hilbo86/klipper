@@ -124,6 +124,7 @@ class LaserToolManager:
         self.saved_idle = None
         self.boundary = None
         self.boundary_moving = False
+        self.boundary_approaching = False
         self.boundary_limits = {
             axis: config.getfloat('boundary_' + axis.lower()
                                   + ('_min' if direction < 0 else '_max'), None)
@@ -136,7 +137,8 @@ class LaserToolManager:
                         '_TOOL_END', '_TOOL_RESUME_CHECK', 'TOOL_STATUS',
                         'TOOL_CALIBRATION_BEGIN', 'TOOL_CALIBRATION_HOLD',
                         'TOOL_CALIBRATION_ARM', 'TOOL_CALIBRATION_END',
-                        'TOOL_BOUNDS_BEGIN', 'TOOL_BOUNDS_MOVE', 'TOOL_BOUNDS_END'):
+                        'TOOL_BOUNDS_BEGIN', 'TOOL_BOUNDS_APPROACH',
+                        'TOOL_BOUNDS_MOVE', 'TOOL_BOUNDS_END'):
             self.gcode.register_command(command, getattr(self, 'cmd_' + command),
                                         desc='Laser Werkzeugverwaltung')
         self.printer.register_event_handler('klippy:ready', self._ready)
@@ -502,13 +504,18 @@ class LaserToolManager:
 
     def check_move(self, move):
         if self.boundary:
-            if not self.boundary_moving:
-                raise move.move_error('Grenzvermessung: nur TOOL_BOUNDS_MOVE erlaubt')
+            if not (self.boundary_moving or self.boundary_approaching):
+                raise move.move_error('Grenzvermessung: nur TOOL_BOUNDS-Bewegungen erlaubt')
             b = self.boundary
             if (any(abs(move.axes_d[i]) > 1.e-6 for i in range(3) if i != b['index'])
-                    or abs(move.axes_d[b['index']]) > 1.000001
+                    or (not self.boundary_approaching
+                        and abs(move.axes_d[b['index']]) > 1.000001)
                     or not b['minimum'] - 1.e-6 <= move.end_pos[b['index']] <= b['maximum'] + 1.e-6):
                 raise move.move_error('Grenzvermessung: unzulaessige Bewegung')
+            if self.boundary_approaching and (
+                    b['axis'] not in ('X', 'Y') or move.axes_d[b['index']] < -1.e-6
+                    or not b['original_limits'][0] <= move.end_pos[b['index']] <= b['original_limits'][1]):
+                raise move.move_error('Grenzvermessung: Anfahrt nur innerhalb regulaerer X/Y-Grenzen')
             return self.base_check_move(move)
         if not self.homing:
             tool = self.job_tool or (self.candidate if self.candidate in TOOLS
@@ -659,6 +666,10 @@ class LaserToolManager:
             return 'IR: Z muss oben gehalten sein'
         if self.reactor.monotonic() > b['deadline']:
             return 'Messsitzung abgelaufen'
+        if self.boundary_approaching and self.printer.lookup_object(
+                'gcode_button ' + b['button']).get_status(
+                    self.reactor.monotonic())['state'] != 'RELEASED':
+            return 'Grenztaster vor Suchstart ausgeloest'
         for name in ('pwm_tool laser', 'pwm_tool aux_tool', 'output_pin tool_enable'):
             if self.printer.lookup_object(name).get_status(
                     self.reactor.monotonic())['value']:
@@ -706,8 +717,46 @@ class LaserToolManager:
             'maximum': max(position[index], limit),
             'original_limits': tuple(self.kin.limits[index]),
             'idle_gcode': idle.idle_gcode,
+            'approach_available': True,
             'deadline': self.reactor.monotonic() + 60.}
         idle.idle_gcode = self.calibration_idle
+
+    def cmd_TOOL_BOUNDS_APPROACH(self, gcmd):
+        b = self.boundary
+        if not b or b['axis'] not in ('X', 'Y') or not b['approach_available']:
+            raise gcmd.error('Anfahrt nur einmal vor der ersten X/Y-Messbewegung erlaubt.')
+        self._update_id(self.reactor.monotonic())
+        reason = self._boundary_reason()
+        if reason:
+            raise gcmd.error('Grenzvermessung: ' + reason)
+        target = gcmd.get_float('POSITION')
+        position = list(self.toolhead.get_position())
+        if (not math.isfinite(target) or target < position[b['index']]
+                or not b['minimum'] <= target <= b['maximum']
+                or not b['original_limits'][0] <= target <= b['original_limits'][1]):
+            raise gcmd.error('Startposition nur vorwaerts innerhalb regulaerem Achsfahrbereich erlaubt.')
+        if self.printer.lookup_object('gcode_button ' + b['button']).get_status(
+                self.reactor.monotonic())['state'] != 'RELEASED':
+            raise gcmd.error('Grenztaster vor Anfahrt nicht frei.')
+        position[b['index']] = target
+        b['approach_available'] = False
+        self.boundary_approaching = True
+        try:
+            # Native Cartesian velocity/acceleration checks and limits apply;
+            # only the subsequent slow one-mm search may extend those limits.
+            speed = min(self.positioning_speed, self.toolhead.get_max_velocity()[0])
+            self.toolhead.manual_move(position, speed)
+            self.toolhead.wait_moves()
+            if self.stopped or self.boundary is not b:
+                raise gcmd.error('Grenzvermessung: Anfahrt abgebrochen.')
+            self._update_id(self.reactor.monotonic())
+            reason = self._boundary_reason()
+            if reason:
+                self._trip('Grenzvermessung: ' + reason)
+                raise gcmd.error('Grenzvermessung: ' + reason)
+            b['deadline'] = self.reactor.monotonic() + 60.
+        finally:
+            self.boundary_approaching = False
 
     def cmd_TOOL_BOUNDS_MOVE(self, gcmd):
         if not self.boundary:
@@ -733,6 +782,7 @@ class LaserToolManager:
         extended = (min(limits[0], b['minimum']), max(limits[1], b['maximum']))
         target_position = list(position)
         target_position[b['index']] = target
+        b['approach_available'] = False
         self.boundary_moving = True
         try:
             self.kin.update_limits(b['index'], extended)
@@ -788,6 +838,7 @@ class LaserToolManager:
                     ('tool', 'axis', 'limit', 'minimum', 'maximum')}
                     if self.boundary else None),
                 'boundary_search_limits': dict(self.boundary_limits),
+                'boundary_approach_supported': True,
                 'available_controls': ([OUTPUTS[tool], 'crosshair', 'Y_Laser']
                     + (['air_assist', 'Steckdose_4', 'water_pump',
                         'heat_exchanger', 'tank_licht', 'uv_disinfector']
