@@ -58,9 +58,7 @@ class LaserToolManager:
         self.id_name = config.get('id_input', 'analog_input ID')
         self.stable_samples = config.getint('stable_samples', 3, minval=2)
         self.id_filter_size = config.getint(
-            'id_filter_samples', 5, minval=1, maxval=9)
-        if self.id_filter_size % 2 != 1:
-            raise config.error('id_filter_samples muss ungerade sein.')
+            'id_filter_samples', 20, minval=1, maxval=50)
         self.id_hysteresis = config.getfloat(
             'id_hysteresis', .5, minval=0., maxval=1.)
         if not math.isfinite(self.id_hysteresis):
@@ -110,6 +108,9 @@ class LaserToolManager:
         self.id_value = self.id_age = None
         self.id_filtered_value = None
         self.id_samples = deque(maxlen=self.id_filter_size)
+        self.id_outliers = deque(maxlen=3)
+        self.id_ignored_samples = 0
+        self.id_last_sample_ignored = False
         self.job_tool = None
         self.job_file = None
         self.preflight_tool = None
@@ -226,6 +227,15 @@ class LaserToolManager:
         age = adc.get_mcu().estimated_print_time(eventtime) - read_time
         return read_time, raw, age
 
+    def _reset_id(self, state):
+        self.id_samples.clear()
+        self.id_outliers.clear()
+        self.id_filtered_value = None
+        self.candidate = 'UNKNOWN'
+        self.detected = state
+        self.samples = 0
+        self.id_last_sample_ignored = False
+
     def _update_id(self, eventtime):
         timestamp, raw, age = self._read_adc(self.id_sensor.mcu_adc, eventtime)
         value = raw * self.id_sensor.scale + self.id_sensor.offset
@@ -234,54 +244,59 @@ class LaserToolManager:
         fresh = timestamp > 0 and -.1 <= age <= self.max_age
         if not fresh or (self.last_sample is not None
                          and timestamp < self.last_sample):
-            self.id_samples.clear()
-            self.id_filtered_value = None
-            self.candidate = self.detected = 'STALE'
-            self.samples = 0
+            self._reset_id('STALE')
             return
         if timestamp == self.last_sample:
             return
         if (self.last_sample is not None
                 and timestamp - self.last_sample > self.max_age):
-            self.id_samples.clear()
-            self.candidate = 'UNKNOWN'
-            self.detected = 'UNSTABLE'
-            self.samples = 0
+            self._reset_id('UNSTABLE')
         self.last_sample = timestamp
-        if self.id_value is None or not 0. < raw < 1.:
-            self.id_samples.clear()
-            self.id_filtered_value = None
-            self.candidate = self.detected = 'UNKNOWN'
-            self.samples = 0
+        self.id_last_sample_ignored = False
+        if self.id_value is None:
+            self._reset_id('UNKNOWN')
             return
 
-        # Retain an established class near its boundaries, but acquire new
-        # classes only inside the acquisition windows. Never average a real tool
-        # change into a third resistor ID or delay revocation behind the filter.
+        # Smooth only reports belonging to one resistor ID. A lone out-of-band
+        # report (including a finite ADC rail) must not clear a trusted window.
+        # Two deviations in three new reports revoke it, independently of the
+        # long mean window, even when the deviations name different tools.
         held = self.detected
-        anchor = self.candidate
-        if anchor in ('UNKNOWN', 'STALE'):
-            anchor = classify_id(value)
-        if anchor != 'UNKNOWN' and (
-                classify_id(value, anchor, self.id_hysteresis) != anchor
-                or any(classify_id(sample, anchor, self.id_hysteresis) != anchor
-                       for sample in self.id_samples)):
-            self.id_samples.clear()
-        self.id_samples.append(value)
-        ordered = sorted(self.id_samples)
-        self.id_filtered_value = ordered[len(ordered) // 2]
-        candidate = classify_id(self.id_filtered_value, held, self.id_hysteresis)
+        valid = 0. < raw < 1.
+        candidate = (classify_id(value, held, self.id_hysteresis)
+                     if valid else 'UNKNOWN')
+        if held not in ('UNKNOWN', 'STALE', 'UNSTABLE'):
+            outlier = candidate != held
+            self.id_outliers.append(outlier)
+            if outlier:
+                if sum(self.id_outliers) < 2:
+                    self.id_ignored_samples += 1
+                    self.id_last_sample_ignored = True
+                    return
+                self._reset_id('UNSTABLE')
+                # After revocation, retention hysteresis no longer applies.
+                candidate = classify_id(value) if valid else 'UNKNOWN'
+        if not valid:
+            self._reset_id('UNKNOWN')
+            return
         if candidate != self.candidate:
-            self.candidate, self.samples = candidate, 0
+            self._reset_id('UNSTABLE')
+            self.candidate = candidate
+        self.id_samples.append(value)
+        self.id_filtered_value = math.fsum(self.id_samples) / len(self.id_samples)
+        # UNKNOWN covers several disjoint gaps: their mean could accidentally
+        # fall into a real tool's window. Only classify a known class's mean.
+        filtered = (classify_id(self.id_filtered_value, held, self.id_hysteresis)
+                    if candidate != 'UNKNOWN' else 'UNKNOWN')
         if len(self.id_samples) < self.id_filter_size:
             self.samples = 0
         else:
             self.samples += 1
         self.detected = 'UNSTABLE'
         if self.samples >= self.stable_samples:
-            self.detected = candidate
-            if candidate in TOOLS:
-                self.motion_tool = candidate
+            self.detected = filtered
+            if filtered in TOOLS:
+                self.motion_tool = filtered
 
     def _temperature_valid(self, tool, eventtime):
         if tool == 'DREMEL' and not self.dremel_sensor:
@@ -635,7 +650,8 @@ class LaserToolManager:
     def _boundary_reason(self):
         b = self.boundary
         if self.detected != b['tool']:
-            return 'Werkzeug-ID geaendert/ungueltig'
+            return ('Werkzeug-ID geaendert/ungueltig (%s; roh=%s; Mittelwert=%s)'
+                    % (self.detected, self.id_value, self.id_filtered_value))
         state = self.toolhead.get_status(self.reactor.monotonic())
         if state['homed_axes'] != 'xyz':
             return 'Achsenreferenz verloren'
@@ -753,6 +769,8 @@ class LaserToolManager:
                 'id_filtered_value': self.id_filtered_value,
                 'id_filter_samples': len(self.id_samples),
                 'id_filter_size': self.id_filter_size,
+                'id_ignored_samples': self.id_ignored_samples,
+                'id_last_sample_ignored': self.id_last_sample_ignored,
                 'id_sample_age': self.id_age, 'stable_samples': self.samples,
                 'requested_tool': self.job_tool, 'power_granted': self.granted,
                 'profile_calibrated': bool(profile and profile['calibrated']),

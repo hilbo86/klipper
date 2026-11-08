@@ -128,6 +128,9 @@ class BoundaryTests(unittest.TestCase):
             if fault == 'id':
                 m.objects['analog_input ID'].data['value'] = 31.
                 m.now += .1
+                m.tool_manager._poll(m.now)
+                self.assertIsNone(m.shutdown_message)
+                m.now += .1
             elif fault == 'reference':
                 m.objects['toolhead'].data['homed_axes'] = ''
             elif fault == 'power':
@@ -143,6 +146,43 @@ class BoundaryTests(unittest.TestCase):
                 self.assertIsNotNone(m.shutdown_message)
                 self.assertIsNone(m.tool_manager.boundary)
                 self.assertEqual(idle.idle_gcode, 'M84')
+
+    def test_measurement_moves_survive_isolated_extreme_id_reports(self):
+        for tool, nominal in (('BLUE_LASER', 80.), ('IR_LASER', 57.2),
+                              ('DREMEL', 16.8)):
+            with self.subTest(tool=tool):
+                m = self.machine(tool)
+                m.run('TOOL_BOUNDS_BEGIN TOOL=%s AXIS=X LIMIT=270' % tool)
+                ignored_before = m.tool_manager.id_ignored_samples
+                for index, value in enumerate((0., nominal, nominal, 100.,
+                                                nominal, nominal, 31., nominal), 1):
+                    m.objects['analog_input ID'].data['value'] = value
+                    m.now += .1
+                    m.tool_manager._poll(m.now)
+                    m.run('TOOL_BOUNDS_MOVE POSITION=%d' % index)
+                    status = m.tool_manager.get_status(m.now)
+                    self.assertEqual(status['detected_tool'], tool)
+                    self.assertEqual(status['id_ignored_samples'] - ignored_before,
+                                     (index + 2) // 3)
+                    self.assertIsNone(m.shutdown_message)
+                    self.assertFalse(m.tool_manager.granted)
+                    self.assertTrue(all(m.pins[pin]['value'] == 0 for pin in
+                                        ('laser', 'aux_tool', 'tool_enable')))
+                m.run('TOOL_BOUNDS_END')
+                self.assertIsNone(m.tool_manager.boundary)
+
+    def test_move_guard_rejects_confirmed_id_loss_before_timer_runs(self):
+        m = self.machine()
+        m.run('TOOL_BOUNDS_BEGIN TOOL=BLUE_LASER AXIS=X LIMIT=270')
+        m.objects['analog_input ID'].data['value'] = 31.
+        m.now += .1
+        m.run('TOOL_BOUNDS_MOVE POSITION=1')
+        m.now += .1
+        with self.assertRaisesRegex(MacroError, 'Werkzeug-ID.*roh=31.0'):
+            m.run('TOOL_BOUNDS_MOVE POSITION=2')
+        self.assertEqual(m.objects['toolhead'].position[0], 1.)
+        m.tool_manager._poll(m.now)
+        self.assertIsNotNone(m.shutdown_message)
 
     def test_finish_inside_restores_idle_outside_also_clears_reference(self):
         for position, expected in ((266., 'xyz'), (267., '')):

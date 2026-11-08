@@ -24,6 +24,11 @@ class ToolTests(unittest.TestCase):
         m.now += .1
         for _ in range(10):
             status = m.tool_manager.get_status(m.now)
+        self.assertEqual(status['id_ignored_samples'], 1)
+        self.assertEqual(status['id_filter_samples'], 20)
+        self.assertEqual(status['detected_tool'], 'BLUE_LASER')
+        m.now += .1
+        status = m.tool_manager.get_status(m.now)
         self.assertEqual(status['stable_samples'], 0)
         self.assertEqual(status['id_filter_samples'], 1)
         self.assertEqual(status['detected_tool'], 'UNSTABLE')
@@ -100,6 +105,9 @@ class ToolTests(unittest.TestCase):
             m = Machine()
             m.job()
             m.objects['analog_input ID'].data['value'] = value
+            m.now += .1
+            m.tool_manager._poll(m.now)
+            self.assertIsNone(m.shutdown_message)
             m.now += .1
             m.tool_manager._poll(m.now)
             self.assertIsNotNone(m.shutdown_message)
@@ -284,14 +292,49 @@ class IdFilterTests(unittest.TestCase):
                 self.assertIsNone(m.shutdown_message)
                 self.assertTrue(m.tool_manager.granted)
 
-    def test_median_rejects_two_in_band_outliers_and_reports_raw_value(self):
+    def test_mean_smooths_in_band_noise_and_reports_raw_value(self):
         m = Machine(id_value=80.)
+        window = [80.] * 20
         for value in (80., 82.9, 82.8, 80., 80.):
+            window = window[1:] + [value]
             status = self.report(m, value)
             self.assertAlmostEqual(status['id_value'], value)
+            self.assertAlmostEqual(status['id_filtered_value'], sum(window) / 20)
+            self.assertEqual(status['id_filter_samples'], 20)
+            self.assertEqual(status['id_filter_size'], 20)
+            self.assertFalse(status['id_last_sample_ignored'])
+
+    def test_isolated_extreme_outliers_preserve_each_tools_mean_and_identity(self):
+        for tool, nominal in (('BLUE_LASER', 80.), ('IR_LASER', 57.2),
+                              ('DREMEL', 16.8)):
+            for outlier in (0., 100., 5., 31.21, 50., 80., 57.2, 16.8):
+                if MODULE.classify_id(outlier) == tool:
+                    continue
+                with self.subTest(tool=tool, outlier=outlier):
+                    m = Machine(id_value=nominal)
+                    status = self.report(m, outlier, poll=True)
+                    self.assertEqual(status['detected_tool'], tool)
+                    self.assertAlmostEqual(status['id_value'], outlier)
+                    self.assertAlmostEqual(status['id_filtered_value'], nominal)
+                    self.assertEqual(status['id_filter_samples'], 20)
+                    self.assertEqual(status['id_ignored_samples'], 1)
+                    self.assertTrue(status['id_last_sample_ignored'])
+                    self.assertIsNone(m.shutdown_message)
+                    status = self.report(m, nominal, poll=True)
+                    self.assertEqual(status['detected_tool'], tool)
+                    self.assertAlmostEqual(status['id_filtered_value'], nominal)
+                    self.assertFalse(status['id_last_sample_ignored'])
+
+    def test_separated_single_spikes_do_not_interrupt_active_job(self):
+        m = Machine()
+        m.job()
+        for value in (0., 80., 80., 59.09, 80., 80., 100., 80., 80.) * 5:
+            status = self.report(m, value, poll=True)
+            self.assertEqual(status['detected_tool'], 'BLUE_LASER')
             self.assertAlmostEqual(status['id_filtered_value'], 80.)
-            self.assertEqual(status['id_filter_samples'], 5)
-            self.assertEqual(status['id_filter_size'], 5)
+            self.assertTrue(status['power_granted'])
+            self.assertIsNone(m.shutdown_message)
+        self.assertEqual(status['id_ignored_samples'], 15)
 
     def test_hysteresis_holds_each_tool_at_both_boundaries(self):
         for low, high, tool in MODULE.ID_WINDOWS:
@@ -314,39 +357,69 @@ class IdFilterTests(unittest.TestCase):
                     self.assertEqual(m.tool_manager.detected, 'UNKNOWN')
                     self.assertFalse(m.tool_manager.granted)
 
-    def test_zero_hysteresis_preserves_strict_exit_threshold(self):
+    def test_zero_hysteresis_requires_confirmation_at_strict_exit_threshold(self):
         m = Machine(tool_options={'id_hysteresis': 0.})
         m.job()
+        self.report(m, 76.99, poll=True)
+        self.assertIsNone(m.shutdown_message)
         self.report(m, 76.99, poll=True)
         self.assertIsNotNone(m.shutdown_message)
         self.assertFalse(m.tool_manager.granted)
 
-    def test_noisy_acquisition_needs_full_window_and_three_new_medians(self):
+    def test_noisy_acquisition_needs_full_window_and_three_new_means(self):
         m = Machine(id_value=0.)
-        reports = (76.99, 77.01, 76.97, 77.02, 77.03, 77.04, 76.96)
+        reports = (79., 81.) * 11
         for value in reports[:-1]:
             status = self.report(m, value)
             self.assertEqual(status['detected_tool'], 'UNSTABLE')
         status = self.report(m, reports[-1])
         self.assertEqual(status['detected_tool'], 'BLUE_LASER')
         self.assertEqual(status['stable_samples'], 3)
-        self.assertAlmostEqual(status['id_filtered_value'], 77.02)
+        self.assertAlmostEqual(status['id_filtered_value'], 80.)
 
-    def test_raw_escape_revokes_active_power_on_first_report(self):
+    def test_second_raw_escape_revokes_power_without_waiting_for_mean_window(self):
         for value in (76.49, 83.51, 31.21, 68.79, 50., 41.82,
-                      59.09, 17.58, 0., 100., float('nan'), float('inf')):
+                      59.09, 17.58, 0., 100.):
             with self.subTest(value=value):
                 m = Machine()
                 m.job()
+                self.report(m, value, poll=True)
+                self.assertIsNone(m.shutdown_message)
+                self.assertTrue(m.tool_manager.granted)
+                self.assertEqual(m.tool_manager.id_filtered_value, 80.)
                 self.report(m, value, poll=True)
                 self.assertIsNotNone(m.shutdown_message)
                 self.assertFalse(m.tool_manager.granted)
                 self.assertTrue(all(pin['value'] == 0 for pin in m.pins.values()))
 
-    def test_direct_power_guard_observes_escape_before_periodic_poll(self):
+    def test_nonfinite_report_invalidates_immediately(self):
+        for value in (float('nan'), float('inf'), -float('inf')):
+            with self.subTest(value=value):
+                m = Machine()
+                m.job()
+                status = self.report(m, value, poll=True)
+                self.assertIsNotNone(m.shutdown_message)
+                self.assertEqual(status['detected_tool'], 'UNKNOWN')
+                self.assertIsNone(status['id_filtered_value'])
+                self.assertEqual(status['id_filter_samples'], 0)
+                self.assertFalse(status['id_last_sample_ignored'])
+
+    def test_two_different_deviations_in_three_reports_also_revoke_power(self):
+        m = Machine()
+        m.job()
+        for value in (59.09, 80.):
+            self.report(m, value, poll=True)
+            self.assertIsNone(m.shutdown_message)
+        self.report(m, 0., poll=True)
+        self.assertIsNotNone(m.shutdown_message)
+        self.assertFalse(m.tool_manager.granted)
+
+    def test_direct_power_guard_observes_confirmed_escape_before_periodic_poll(self):
         m = Machine()
         m.job()
         m.objects['analog_input ID'].data['value'] = 76.49
+        m.now += .1
+        m.power(.1)
         m.now += .1
         with self.assertRaises(MacroError):
             m.power(.1)
@@ -354,7 +427,10 @@ class IdFilterTests(unittest.TestCase):
 
     def test_tool_change_refills_filter_without_synthetic_intermediate_id(self):
         m = Machine()
-        for _ in range(6):
+        status = self.report(m, 59.09)
+        self.assertEqual(status['detected_tool'], 'BLUE_LASER')
+        self.assertEqual(status['id_filtered_value'], 80.)
+        for _ in range(m.tool_manager.id_filter_size + m.tool_manager.stable_samples - 2):
             status = self.report(m, 59.09)
             self.assertEqual(status['detected_tool'], 'UNSTABLE')
             self.assertAlmostEqual(status['id_filtered_value'], 59.09)
@@ -364,11 +440,29 @@ class IdFilterTests(unittest.TestCase):
 
     def test_alternating_tools_never_form_a_filtered_tool_or_conflict_id(self):
         m = Machine()
-        for value in (59.09, 82.12) * 10:
+        self.report(m, 59.09)
+        self.report(m, 80.)
+        for value in (59.09, 80.) * 15:
             status = self.report(m, value)
             self.assertEqual(status['detected_tool'], 'UNSTABLE')
             self.assertAlmostEqual(status['id_filtered_value'], value)
             self.assertEqual(status['id_filter_samples'], 1)
+
+    def test_unknown_raw_values_cannot_average_into_a_valid_tool(self):
+        m = Machine(id_value=0.)
+        for value in (76., 84.) * 20:
+            status = self.report(m, value)
+            self.assertNotIn(status['detected_tool'], MODULE.TOOLS)
+        self.assertAlmostEqual(status['id_filtered_value'], 80.)
+        self.assertEqual(status['detected_tool'], 'UNKNOWN')
+
+    def test_confirmed_escape_requires_full_new_acquisition_without_hysteresis(self):
+        m = Machine()
+        self.report(m, 76.49)
+        self.report(m, 76.49)
+        select(m, 76.9)
+        self.assertEqual(m.tool_manager.detected, 'UNKNOWN')
+        self.assertFalse(m.tool_manager.granted)
 
     def test_stale_id_clears_filter_and_requires_full_reacquisition(self):
         m = Machine()
@@ -380,7 +474,7 @@ class IdFilterTests(unittest.TestCase):
         self.assertIsNone(status['id_filtered_value'])
         self.assertEqual(status['id_filter_samples'], 0)
         adc.timestamp = None
-        for _ in range(6):
+        for _ in range(m.tool_manager.id_filter_size + m.tool_manager.stable_samples - 2):
             status = self.report(m, 82.12)
             self.assertEqual(status['detected_tool'], 'UNSTABLE')
         status = self.report(m, 82.12)
@@ -414,8 +508,17 @@ class IdFilterTests(unittest.TestCase):
                 self.assertEqual(status['detected_tool'], 'STALE')
                 self.assertEqual(status['id_filter_samples'], 0)
 
-    def test_filter_rejects_even_window_and_nonfinite_hysteresis(self):
-        for options in ({'id_filter_samples': 4},
+    def test_filter_accepts_even_and_odd_sizes_and_enforces_limits(self):
+        for size in (1, 4, 5, 20, 50):
+            with self.subTest(size=size):
+                m = Machine(tool_options={'id_filter_samples': size})
+                self.assertEqual(m.tool_manager.detected, 'BLUE_LASER')
+                self.assertEqual(len(m.tool_manager.id_samples), size)
+                self.report(m, 0.)
+                self.assertEqual(m.tool_manager.detected, 'BLUE_LASER')
+                self.report(m, 0.)
+                self.assertNotEqual(m.tool_manager.detected, 'BLUE_LASER')
+        for options in ({'id_filter_samples': 0}, {'id_filter_samples': 51},
                         {'id_hysteresis': float('nan')}):
             with self.subTest(options=options), self.assertRaises(MacroError):
                 Machine(tool_options=options)

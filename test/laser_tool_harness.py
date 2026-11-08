@@ -71,7 +71,11 @@ class Config:
         return float(value) if value is not None else None
 
     def getint(self, key, default=None, **kwargs):
-        return int(self.get(key, default))
+        value = int(self.get(key, default))
+        if (('minval' in kwargs and value < kwargs['minval'])
+                or ('maxval' in kwargs and value > kwargs['maxval'])):
+            self.error('Value outside range: ' + key)
+        return value
 
     def getboolean(self, key, default=False):
         return str(self.get(key, default)).lower() == 'true'
@@ -272,7 +276,8 @@ def start_job(host, tool='BLUE_LASER'):
 def select(machine, value):
     machine.objects['analog_input ID'].data['value'] = value
     manager = machine.tool_manager
-    for _ in range(manager.id_filter_size + manager.stable_samples - 1):
+    # One report may be ignored while the previous identity is still trusted.
+    for _ in range(manager.id_filter_size + manager.stable_samples):
         machine.now += .1
         manager._update_id(machine.now)
 

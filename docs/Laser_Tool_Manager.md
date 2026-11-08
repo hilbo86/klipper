@@ -4,30 +4,36 @@
 
 The custom `laser_tool_manager` reads the timestamped MCU ADC reports of
 `analog_input ID`. Motor operation can introduce noise near an ID window
-boundary. A median filter and retention hysteresis stabilize the classification;
-they do not alter the ADC input or the temperature channels.
+boundary. A moving mean, rejection of isolated outliers and retention hysteresis
+stabilize the classification. They do not alter the ADC input or temperature
+channels.
 
 The following options are optional in the existing `[laser_tool_manager]`
 section. Their defaults also apply to configurations that omit them:
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `id_filter_samples` | `5` | Odd median window size, from 1 to 9. A size of 1 disables smoothing. |
+| `id_filter_samples` | `20` | Moving mean window size, from 1 to 50, even or odd. A size of 1 disables averaging, but keeps outlier confirmation. |
 | `id_hysteresis` | `0.5` | Retention margin on each side of an established ID window, in percentage points of the scaled ID value. Allowed range: 0 to 1. |
-| `stable_samples` | `3` | Consecutive classifications of new, full median windows required for recognition. |
+| `stable_samples` | `3` | Consecutive accepted classifications with a full mean window required for recognition. |
 | `max_sample_age` | `0.6` | Maximum age of the latest ADC report, in seconds. |
 
 ## Acquisition and retention
 
-Each distinct, fresh ADC report contributes at most once to the median window.
-Repeated status requests cannot fill the window or advance recognition. The
-median is an observed sample, rather than an average between resistor IDs.
+Each distinct, fresh ADC report contributes at most once to the mean window.
+Repeated status requests cannot fill the window, advance recognition or confirm
+an outlier. Only values belonging to the same ID class enter a window. A class
+change clears the previous window; unknown values cannot acquire a tool just
+because their arithmetic mean falls inside a tool's interval.
 
 Recognition requires a full window followed by the configured number of stable
-classifications. With the defaults, seven distinct reports are required: the
-fifth report produces the first full median, and the seventh confirms the ID.
-At a 0.1-second report interval this spans about 0.6 seconds from the first report,
-plus the report and host polling phases.
+classifications. With the defaults, 22 accepted reports are required: the 20th
+report produces the first full mean, and the 22nd confirms the ID. At a
+0.1-second report interval, the mean normally covers about two seconds and first
+recognition spans about 2.1 seconds from the first report, plus report and host
+polling phases. Changing an established ID can additionally ignore its first
+deviating report. Old explicit window sizes remain valid; omit the option or set
+it to 20 to use the larger default.
 
 A new identity must be acquired inside its open acquisition interval. BLUE_LASER
 uses 77 to 83, centered on the measured idle value of approximately 80 percent.
@@ -38,8 +44,7 @@ already enabled. The other ID intervals are unchanged.
 
 Only an already established classification uses hysteresis. Once recognized,
 BLUE_LASER is retained while reports remain strictly between 76.5 and 83.5 with
-the default hysteresis. The median suppresses individual outliers within this
-retention interval.
+the default hysteresis. The moving mean smooths noise within this interval.
 
 A persistent value outside the acquisition interval cannot acquire a
 tool merely through smoothing. Measure the motor-on and motor-off ranges before
@@ -47,17 +52,29 @@ changing the calibrated intervals or increasing hysteresis.
 
 ## Revocation and freshness
 
-A new raw report outside the current retention interval clears the old filter
-immediately, including NONE, conflicting tool combinations and another tool's
-ID. ADC rails and nonfinite values invalidate recognition without filtering.
-During an active job or calibration grant, the existing shutdown path therefore
-acts on the first such report processed by the periodic check. Positive output
-commands also check the latest report before accepting power. The filter adds
-no multi-report grace period to those failures; report and polling latency still
-apply and need verification on the device.
+Once an ID is established, a single finite raw report outside its retention
+interval is omitted from the mean without dropping the recognized tool. This
+also applies to a single finite ADC rail, NONE, a conflicting combination or
+another tool ID. Before recognition there is no trusted ID to retain.
+
+Two deviations within the last three distinct reports discard recognition and
+the old mean. They need not name the same other tool; alternating bad/good/bad
+reports cannot keep the previous tool indefinitely. A persistent tool change or
+disconnection is therefore detected on its second report, independently of the
+20-report mean window. During a job, calibration grant or boundary measurement,
+the periodic monitor then follows the existing shutdown path. Positive output
+and boundary movement commands also check new reports before proceeding.
+
+This deliberately adds one report of confirmation for a persistent change, or
+two report intervals when the deviations are separated by a matching report.
+With 0.1-second reports these are about 0.1 or 0.2 seconds after the first
+deviation, plus report and host polling phases. Physical shutdown latency still
+needs verification on the device. The long mean is never used to average a real
+tool change into a different resistor ID.
 
 Stale reports, backwards timestamps and gaps longer than `max_sample_age`
-discard recognition and filter history. Recovery requires a complete new
+discard recognition and filter history immediately, as do nonfinite values.
+Recovery requires a complete new
 acquisition. Unplugging and reconnecting a tool cannot resume a shutdown job.
 IR motion protection retains its existing behavior during uncertain detection.
 
@@ -66,18 +83,23 @@ IR motion protection retains its existing behavior during uncertain detection.
 `TOOL_STATUS` exposes:
 
 - `id_value`: latest scaled raw ADC report, as before; `None` for nonfinite data.
-- `id_filtered_value`: current median, or `None` after an invalid/stale report.
-- `id_filter_samples`: number of reports currently buffered.
-- `id_filter_size`: configured median window size.
+- `id_filtered_value`: moving arithmetic mean, or `None` after an invalid/stale report.
+- `id_filter_samples`: number of accepted reports currently buffered.
+- `id_filter_size`: configured mean window size.
+- `id_ignored_samples`: cumulative number of reports ignored while retaining an
+  established ID since Klippy startup; an initial report of a real change also counts.
+- `id_last_sample_ignored`: whether the latest report was omitted as a possible
+  isolated outlier. Its raw value remains visible in `id_value`.
 - `stable_samples`: consecutive classifications after the window is full.
 - `id_sample_age`: age of the latest report.
 
 Keep machining power physically off for the first check. Compare status with
 motors disabled and enabled, then repeat the idle tool changes. After recognition
-settles, the buffer should contain five reports and the displayed tool should
+settles, the buffer should contain 20 reports and the displayed tool should
 remain stable during the measured motor noise. Confirm NONE and each individual
 tool again. These host tests do not replace the later physical shutdown-latency
-measurement.
+measurement. A boundary shutdown now includes the detected state, raw value and
+current mean so repeated failures provide useful diagnostic values.
 
 ## Power-off travel limit measurement
 
