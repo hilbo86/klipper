@@ -5,12 +5,14 @@ from collections import deque
 
 
 TOOLS = ('BLUE_LASER', 'IR_LASER', 'DREMEL')
-ID_WINDOWS = (
+ID_DEFAULTS = (
     # Measured idle centers: Main 80%, IR 57.4%; keep +/-3 point tolerance.
-    (77.00, 83.00, 'BLUE_LASER'), (54.40, 60.40, 'IR_LASER'),
-    (14.58, 20.58, 'DREMEL'), (65.79, 71.79, 'BLUE_LASER+IR_LASER'),
-    (47.00, 53.00, 'BLUE_LASER+DREMEL'),
-    (38.82, 44.82, 'IR_LASER+DREMEL'), (28.21, 34.21, 'NONE'))
+    (80., 3., 'BLUE_LASER'), (57.4, 3., 'IR_LASER'),
+    (17.58, 3., 'DREMEL'), (68.79, 3., 'BLUE_LASER+IR_LASER'),
+    (50., 3., 'BLUE_LASER+DREMEL'),
+    (41.82, 3., 'IR_LASER+DREMEL'), (31.21, 3., 'NONE'))
+ID_WINDOWS = tuple((center - tolerance, center + tolerance, name)
+                   for center, tolerance, name in ID_DEFAULTS)
 OUTPUTS = {'BLUE_LASER': 'laser', 'IR_LASER': 'aux_tool',
            'DREMEL': 'aux_tool'}
 TEMPERATURES = {'BLUE_LASER': 'temperature_sensor Laser',
@@ -20,8 +22,8 @@ BOUNDARY_AXES = {'X': (0, 1, 'X_MAX'), 'Y': (1, 1, 'Y_MAX'),
                  'Z': (2, -1, 'Z_MIN')}
 
 
-def classify_id(value, previous=None, hysteresis=0.):
-    for low, high, name in ID_WINDOWS:
+def classify_id(value, previous=None, hysteresis=0., windows=ID_WINDOWS):
+    for low, high, name in windows:
         margin = hysteresis if name == previous else 0.
         if low - margin < value < high + margin:
             return name
@@ -65,6 +67,44 @@ class LaserToolManager:
             'id_hysteresis', .5, minval=0., maxval=1.)
         if not math.isfinite(self.id_hysteresis):
             raise config.error('id_hysteresis muss endlich sein.')
+        self.id_configs = {False: {}, True: {}}
+        self.id_windows_by_mode = {False: [], True: []}
+        for default_center, default_tolerance, name in ID_DEFAULTS:
+            prefix = name.lower().replace('+', '_') + '_id_'
+            center = config.getfloat(prefix + 'center', default_center)
+            tolerance = config.getfloat(prefix + 'tolerance', default_tolerance)
+            motor_tolerance = config.getfloat(
+                prefix + 'tolerance_steppers_on', tolerance)
+            if not math.isfinite(motor_tolerance) or motor_tolerance < tolerance:
+                raise config.error(prefix + 'tolerance_steppers_on muss endlich '
+                                   + 'und mindestens so gross wie tolerance sein.')
+            for enabled, width in ((False, tolerance), (True, motor_tolerance)):
+                low, high = center - width, center + width
+                if (not all(math.isfinite(v) for v in (center, width, low, high))
+                        or not 0. <= low < high <= 100.):
+                    raise config.error('Ungueltiges ID-Fenster fuer ' + name
+                                       + ': endlicher Mittelpunkt, Toleranz >0 '
+                                       + 'und Grenzen 0..100 erforderlich.')
+                self.id_configs[enabled][name] = {
+                    'center': center, 'tolerance': width,
+                    'tolerance_steppers_off': tolerance,
+                    'tolerance_steppers_on': motor_tolerance,
+                    'min': low, 'max': high,
+                    'hold_min': low - self.id_hysteresis,
+                    'hold_max': high + self.id_hysteresis}
+                self.id_windows_by_mode[enabled].append((low, high, name))
+        for enabled, windows in self.id_windows_by_mode.items():
+            ordered = sorted(windows)
+            for previous, following in zip(ordered, ordered[1:]):
+                if previous[1] + self.id_hysteresis > following[0]:
+                    raise config.error(
+                        'ID-Fenster/Hysterese ueberlappt fremde Erkennung '
+                        + '(Stepper %s): ' % ('an' if enabled else 'aus')
+                        + previous[2] + ' / ' + following[2])
+            self.id_windows_by_mode[enabled] = tuple(windows)
+        self.id_steppers_on = False
+        self.id_config = self.id_configs[False]
+        self.id_windows = self.id_windows_by_mode[False]
         self.max_age = config.getfloat('max_sample_age', .6, above=0.)
         self.interval = config.getfloat('poll_interval', .1, above=0.)
         self.temp_max_age = config.getfloat('temperature_max_age', 1., above=0.)
@@ -113,6 +153,8 @@ class LaserToolManager:
         self.id_outliers = deque(maxlen=3)
         self.id_ignored_samples = 0
         self.id_last_sample_ignored = False
+        self.id_recent_values = deque(maxlen=3)
+        self.id_last_reset = None
         self.job_tool = None
         self.job_file = None
         self.preflight_tool = None
@@ -156,6 +198,7 @@ class LaserToolManager:
 
     def _ready(self):
         self.id_sensor = self.printer.lookup_object(self.id_name)
+        self.stepper_enable = self.printer.lookup_object('stepper_enable')
         self.toolhead = self.printer.lookup_object('toolhead')
         self.sd = self.printer.lookup_object('virtual_sdcard')
         self.pause = self.printer.lookup_object('pause_resume')
@@ -232,7 +275,17 @@ class LaserToolManager:
         age = adc.get_mcu().estimated_print_time(eventtime) - read_time
         return read_time, raw, age
 
-    def _reset_id(self, state):
+    def _reset_id(self, state, reason=None):
+        # Preserve the cause of losing an established identity while later
+        # reports refill the filter; an in-band value is not itself that cause.
+        if reason and (self.detected not in ('UNKNOWN', 'UNSTABLE', 'STALE')
+                       or self.id_last_reset is None):
+            self.id_last_reset = {
+                'reason': reason, 'previous_tool': self.detected,
+                'raw_value': self.id_value, 'filtered_value': self.id_filtered_value,
+                'filter_samples': len(self.id_samples),
+                'steppers_on': self.id_steppers_on,
+                'recent_values': list(self.id_recent_values)}
         self.id_samples.clear()
         self.id_outliers.clear()
         self.id_filtered_value = None
@@ -244,6 +297,15 @@ class LaserToolManager:
     def _update_id(self, eventtime):
         if not self.ready:
             return
+        enabled = any(self.stepper_enable.get_status(eventtime)['steppers'].values())
+        if enabled != self.id_steppers_on:
+            if not enabled:
+                # Never reuse wide-band motor noise to confirm a narrow-band ID.
+                self._reset_id('UNSTABLE', 'Stepper ausgeschaltet: enge '
+                               'ID-Erkennung neu aufbauen')
+            self.id_steppers_on = enabled
+            self.id_config = self.id_configs[enabled]
+            self.id_windows = self.id_windows_by_mode[enabled]
         timestamp, raw, age = self._read_adc(self.id_sensor.mcu_adc, eventtime)
         value = raw * self.id_sensor.scale + self.id_sensor.offset
         self.id_value = value if math.isfinite(value) else None
@@ -251,17 +313,19 @@ class LaserToolManager:
         fresh = timestamp > 0 and -.1 <= age <= self.max_age
         if not fresh or (self.last_sample is not None
                          and timestamp < self.last_sample):
-            self._reset_id('STALE')
+            self._reset_id('STALE', 'ADC-Bericht veraltet/ungueltiger Zeitstempel')
             return
         if timestamp == self.last_sample:
             return
+        self.id_recent_values.append(self.id_value)
         if (self.last_sample is not None
                 and timestamp - self.last_sample > self.max_age):
-            self._reset_id('UNSTABLE')
+            self._reset_id('UNSTABLE', 'ADC-Berichtsluecke %.3f s'
+                           % (timestamp - self.last_sample))
         self.last_sample = timestamp
         self.id_last_sample_ignored = False
         if self.id_value is None:
-            self._reset_id('UNKNOWN')
+            self._reset_id('UNKNOWN', 'Nicht endlicher ADC-Wert')
             return
 
         # Smooth only reports belonging to one resistor ID. A lone out-of-band
@@ -270,7 +334,7 @@ class LaserToolManager:
         # long mean window, even when the deviations name different tools.
         held = self.detected
         valid = 0. < raw < 1.
-        candidate = (classify_id(value, held, self.id_hysteresis)
+        candidate = (classify_id(value, held, self.id_hysteresis, self.id_windows)
                      if valid else 'UNKNOWN')
         if held not in ('UNKNOWN', 'STALE', 'UNSTABLE'):
             outlier = candidate != held
@@ -280,11 +344,11 @@ class LaserToolManager:
                     self.id_ignored_samples += 1
                     self.id_last_sample_ignored = True
                     return
-                self._reset_id('UNSTABLE')
+                self._reset_id('UNSTABLE', 'Zwei ID-Abweichungen in drei Berichten')
                 # After revocation, retention hysteresis no longer applies.
-                candidate = classify_id(value) if valid else 'UNKNOWN'
+                candidate = classify_id(value, windows=self.id_windows) if valid else 'UNKNOWN'
         if not valid:
-            self._reset_id('UNKNOWN')
+            self._reset_id('UNKNOWN', 'ADC-Schienenwert')
             return
         if candidate != self.candidate:
             self._reset_id('UNSTABLE')
@@ -293,7 +357,7 @@ class LaserToolManager:
         self.id_filtered_value = math.fsum(self.id_samples) / len(self.id_samples)
         # UNKNOWN covers several disjoint gaps: their mean could accidentally
         # fall into a real tool's window. Only classify a known class's mean.
-        filtered = (classify_id(self.id_filtered_value, held, self.id_hysteresis)
+        filtered = (classify_id(self.id_filtered_value, held, self.id_hysteresis, self.id_windows)
                     if candidate != 'UNKNOWN' else 'UNKNOWN')
         if len(self.id_samples) < self.id_filter_size:
             self.samples = 0
@@ -664,8 +728,17 @@ class LaserToolManager:
     def _boundary_reason(self):
         b = self.boundary
         if self.detected != b['tool']:
-            return ('Werkzeug-ID geaendert/ungueltig (%s; roh=%s; Mittelwert=%s)'
-                    % (self.detected, self.id_value, self.id_filtered_value))
+            window = self.id_config[b['tool']]
+            reset = self.id_last_reset or {}
+            return ('Werkzeug-ID geaendert/ungueltig (%s; Kandidat=%s; roh=%s; '
+                    'Mittelwert=%s; Samples=%d/%d; Stepper=%s; '
+                    '%s-Fenster=%.3f..%.3f; '
+                    'letzter Reset=%s; Rohwerte=%s)'
+                    % (self.detected, self.candidate, self.id_value, self.id_filtered_value,
+                       len(self.id_samples), self.id_filter_size,
+                       'an' if self.id_steppers_on else 'aus', b['tool'],
+                       window['min'], window['max'], reset.get('reason', 'Erkennung im Aufbau'),
+                       reset.get('recent_values', [])))
         state = self.toolhead.get_status(self.reactor.monotonic())
         if state['homed_axes'] != 'xyz':
             return 'Achsenreferenz verloren'
@@ -829,6 +902,9 @@ class LaserToolManager:
                 'id_filter_size': self.id_filter_size,
                 'id_ignored_samples': self.id_ignored_samples,
                 'id_last_sample_ignored': self.id_last_sample_ignored,
+                'id_candidate': self.candidate, 'id_windows': self.id_config,
+                'id_steppers_on': self.id_steppers_on,
+                'id_last_reset': self.id_last_reset,
                 'id_sample_age': self.id_age, 'stable_samples': self.samples,
                 'requested_tool': self.job_tool, 'power_granted': self.granted,
                 'profile_calibrated': bool(profile and profile['calibrated']),

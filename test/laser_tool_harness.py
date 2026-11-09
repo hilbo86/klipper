@@ -221,6 +221,8 @@ def attach(host, tool_options=None, initialize=True):
     host.objects['gcode_macro'] = SimpleNamespace(
         load_template=lambda *args: args[-1])
     host.objects['toolhead'] = Toolhead(host)
+    host.objects.setdefault('stepper_enable', Status({'steppers': {
+        name: False for name in ('stepper_x', 'stepper_y', 'stepper_y1', 'stepper_z')}}))
     for name in ('X_MAX', 'Y_MAX', 'Z_MIN'):
         host.objects.setdefault('gcode_button ' + name, Status({'state': 'RELEASED'}))
     for name, kind in (('laser', 'pwm_tool'), ('aux_tool', 'pwm_tool'),

@@ -328,6 +328,214 @@ class IdFilterTests(unittest.TestCase):
             manager._poll(machine.now)
         return manager.get_status(machine.now)
 
+    @staticmethod
+    def motors(machine, enabled, name='stepper_y1'):
+        machine.objects['stepper_enable'].data['steppers'][name] = enabled
+
+    def test_enabled_stationary_driver_widens_ir_without_losing_identity(self):
+        m = Machine(tool_options={'ir_laser_id_tolerance': 1.,
+                                 'ir_laser_id_tolerance_steppers_on': 3.},
+                    id_value=57.4)
+        m.run('TOOL_BOUNDS_BEGIN TOOL=IR_LASER AXIS=Y LIMIT=292')
+        status = m.tool_manager.get_status(m.now)
+        self.assertFalse(status['id_steppers_on'])
+        self.assertAlmostEqual(status['id_windows']['IR_LASER']['min'], 56.4)
+        self.motors(m, True)
+        for value in (54.77411477411478, 60.25, 54.8, 57.4) * 10:
+            status = self.report(m, value, poll=True)
+            self.assertTrue(status['id_steppers_on'])
+            self.assertEqual(status['detected_tool'], 'IR_LASER')
+            self.assertEqual(status['id_filter_samples'], 20)
+            self.assertIsNone(m.shutdown_message)
+        self.assertEqual(m.objects['toolhead'].moves, [])
+        self.assertAlmostEqual(status['id_windows']['IR_LASER']['min'], 54.4)
+        self.assertAlmostEqual(status['id_windows']['IR_LASER']['max'], 60.4)
+        self.assertEqual(status['id_ignored_samples'], 0)
+
+    def test_motor_off_discards_wide_history_and_requires_fresh_narrow_acquisition(self):
+        m = Machine(tool_options={'ir_laser_id_tolerance': 1.,
+                                 'ir_laser_id_tolerance_steppers_on': 3.},
+                    id_value=57.4)
+        self.motors(m, True)
+        select(m, 54.8)
+        self.assertEqual(m.tool_manager.detected, 'IR_LASER')
+        self.motors(m, False)
+        # The cached ADC report from before motor disable cannot start the filter.
+        status = m.tool_manager.get_status(m.now)
+        self.assertFalse(status['id_steppers_on'])
+        self.assertEqual(status['detected_tool'], 'UNSTABLE')
+        self.assertEqual(status['id_filter_samples'], 0)
+        self.assertIsNone(status['id_filtered_value'])
+        select(m, 54.8)
+        self.assertEqual(m.tool_manager.detected, 'UNKNOWN')
+        for _ in range(21):
+            status = self.report(m, 57.4)
+            self.assertEqual(status['detected_tool'], 'UNSTABLE')
+        status = self.report(m, 57.4)
+        self.assertEqual(status['detected_tool'], 'IR_LASER')
+        self.assertAlmostEqual(status['id_filtered_value'], 57.4)
+
+    def test_motor_mode_changes_only_after_last_enabled_driver_is_disabled(self):
+        m = Machine(tool_options={'ir_laser_id_tolerance': 1.,
+                                 'ir_laser_id_tolerance_steppers_on': 3.},
+                    id_value=57.4)
+        self.motors(m, True, 'stepper_x')
+        self.motors(m, True, 'stepper_z')
+        self.report(m, 54.8)
+        self.motors(m, False, 'stepper_x')
+        status = self.report(m, 54.8)
+        self.assertTrue(status['id_steppers_on'])
+        self.assertEqual(status['detected_tool'], 'IR_LASER')
+        self.motors(m, False, 'stepper_z')
+        status = self.report(m, 54.8)
+        self.assertFalse(status['id_steppers_on'])
+        self.assertEqual(status['id_candidate'], 'UNKNOWN')
+        self.assertEqual(status['id_filter_samples'], 1)
+
+    def test_motor_on_acquisition_uses_configured_wide_band(self):
+        options = {'ir_laser_id_tolerance': 1.,
+                   'ir_laser_id_tolerance_steppers_on': 3.}
+        m = Machine(tool_options=options, id_value=54.8)
+        self.assertEqual(m.tool_manager.detected, 'UNKNOWN')
+        self.motors(m, True)
+        select(m, 54.8)
+        self.assertEqual(m.tool_manager.detected, 'IR_LASER')
+
+    def test_motor_band_configuration_rejects_contraction_overlap_and_nonfinite(self):
+        for width in (0., -1., .5, float('nan'), float('inf'), 5.):
+            with self.subTest(width=width), self.assertRaises(MacroError):
+                Machine(tool_options={'ir_laser_id_tolerance': 1.,
+                                      'ir_laser_id_tolerance_steppers_on': width})
+
+    def test_closed_lid_and_enabled_motors_still_detect_disconnects_and_conflicts(self):
+        for value in (0., 100., 31.21, 50., 68.79, 41.82, 80.,
+                      17.58, 60.91):
+            with self.subTest(value=value):
+                m = Machine(tool_options={'ir_laser_id_tolerance': 1.,
+                                         'ir_laser_id_tolerance_steppers_on': 3.},
+                            id_value=57.4)
+                self.motors(m, True)
+                # RELEASED is the physical lid's closed state.
+                self.assertEqual(m.objects['gcode_button deckelklappe'].data['state'],
+                                 'RELEASED')
+                m.run('TOOL_BOUNDS_BEGIN TOOL=IR_LASER AXIS=Y LIMIT=292')
+                self.report(m, value, poll=True)
+                self.assertIsNone(m.shutdown_message)
+                self.assertEqual(m.tool_manager.detected, 'IR_LASER')
+                self.report(m, value, poll=True)
+                self.assertIsNotNone(m.shutdown_message)
+                self.assertFalse(m.tool_manager.granted)
+
+    def test_motor_mode_does_not_bypass_stale_or_nonfinite_adc_checks(self):
+        for invalid in ('stale', 'nan'):
+            with self.subTest(invalid=invalid):
+                m = Machine(tool_options={'ir_laser_id_tolerance': 1.,
+                                         'ir_laser_id_tolerance_steppers_on': 3.},
+                            id_value=57.4)
+                self.motors(m, True)
+                m.run('TOOL_BOUNDS_BEGIN TOOL=IR_LASER AXIS=Y LIMIT=292')
+                if invalid == 'stale':
+                    adc = m.objects['analog_input ID'].mcu_adc
+                    adc.timestamp = adc.get_last_value()[0]
+                    m.now += .7
+                    m.tool_manager._poll(m.now)
+                else:
+                    self.report(m, float('nan'), poll=True)
+                self.assertIsNotNone(m.shutdown_message)
+                self.assertEqual(len(m.tool_manager.id_samples), 0)
+
+    def test_configured_ir_window_applies_to_acquisition_retention_and_reacquisition(self):
+        options = {'ir_laser_id_center': 55., 'ir_laser_id_tolerance': .8}
+        m = Machine(tool_options=options, id_value=54.3)
+        self.assertEqual(m.tool_manager.detected, 'IR_LASER')
+        status = self.report(m, 53.8)
+        select(m, 53.8)
+        self.assertEqual(m.tool_manager.detected, 'IR_LASER')
+        window = status['id_windows']['IR_LASER']
+        self.assertAlmostEqual(window['min'], 54.2)
+        self.assertAlmostEqual(window['max'], 55.8)
+        self.assertAlmostEqual(window['hold_min'], 53.7)
+        self.assertEqual(status['id_windows']['BLUE_LASER']['center'], 80.)
+        m = Machine(tool_options=options, id_value=57.4)
+        self.assertEqual(m.tool_manager.detected, 'UNKNOWN')
+        select(m, 80.)
+        self.report(m, 54.3)
+        status = self.report(m, 54.3)
+        self.assertEqual(status['id_candidate'], 'IR_LASER')
+        select(m, 54.3)
+        self.assertEqual(m.tool_manager.detected, 'IR_LASER')
+
+    def test_all_tool_conflict_and_none_windows_are_configurable(self):
+        for center, tolerance, tool in MODULE.ID_DEFAULTS:
+            prefix = tool.lower().replace('+', '_') + '_id_'
+            options = {prefix + 'center': center + .2, prefix + 'tolerance': .1}
+            with self.subTest(tool=tool):
+                m = Machine(tool_options=options, id_value=center)
+                self.assertEqual(m.tool_manager.detected, 'UNKNOWN')
+                m = Machine(tool_options=options, id_value=center + .2)
+                self.assertEqual(m.tool_manager.detected, tool)
+                if tool not in MODULE.TOOLS:
+                    with self.assertRaises(MacroError):
+                        start_job(m)
+                    self.assertFalse(m.tool_manager.granted)
+
+    def test_configured_windows_reject_invalid_bounds_and_foreign_overlap(self):
+        for options in ({'ir_laser_id_center': float('nan')},
+                        {'ir_laser_id_center': float('inf')},
+                        {'ir_laser_id_tolerance': float('nan')},
+                        {'ir_laser_id_tolerance': 0.},
+                        {'ir_laser_id_tolerance': -1.},
+                        {'ir_laser_id_center': 2.},
+                        {'ir_laser_id_center': 99.},
+                        {'ir_laser_id_center': 50.},
+                        {'ir_laser_id_center': 56.4}):
+            with self.subTest(options=options), self.assertRaises(MacroError):
+                Machine(tool_options=options)
+        m = Machine(tool_options={'ir_laser_id_center': 56.5}, id_value=56.5)
+        self.assertEqual(m.tool_manager.detected, 'IR_LASER')
+
+    def test_prior_outliers_explain_shutdown_on_later_in_band_ir_value(self):
+        m = Machine(id_value=57.4)
+        m.run('TOOL_BOUNDS_BEGIN TOOL=IR_LASER AXIS=Y LIMIT=292')
+        self.report(m, 60.91)
+        self.report(m, 60.91)
+        status = self.report(m, 54.77411477411478, poll=True)
+        self.assertEqual(status['detected_tool'], 'UNSTABLE')
+        self.assertEqual(status['id_candidate'], 'IR_LASER')
+        self.assertEqual(status['id_filter_samples'], 1)
+        reset = status['id_last_reset']
+        self.assertEqual(reset['previous_tool'], 'IR_LASER')
+        self.assertEqual(reset['reason'], 'Zwei ID-Abweichungen in drei Berichten')
+        self.assertEqual(reset['raw_value'], 60.91)
+        self.assertEqual(reset['filter_samples'], 20)
+        self.assertEqual(reset['recent_values'][-2:], [60.91, 60.91])
+        self.assertIn('Samples=1/20', m.shutdown_message)
+        self.assertIn('IR_LASER-Fenster=54.400..60.400', m.shutdown_message)
+        self.assertIn(reset['reason'], m.shutdown_message)
+
+    def test_report_gap_explains_single_sample_ir_filter_in_shutdown(self):
+        m = Machine(id_value=57.4)
+        m.run('TOOL_BOUNDS_BEGIN TOOL=IR_LASER AXIS=Y LIMIT=292')
+        m.now += 1.
+        status = self.report(m, 54.77411477411478, poll=True)
+        self.assertEqual(status['detected_tool'], 'UNSTABLE')
+        self.assertEqual(status['id_filter_samples'], 1)
+        self.assertEqual(status['id_last_reset']['reason'], 'ADC-Berichtsluecke 1.100 s')
+        self.assertEqual(status['id_last_reset']['previous_tool'], 'IR_LASER')
+        self.assertIn('ADC-Berichtsluecke', m.shutdown_message)
+
+    def test_repeated_stale_queries_preserve_original_reset_diagnostics(self):
+        m = Machine(id_value=57.4)
+        adc = m.objects['analog_input ID'].mcu_adc
+        adc.timestamp = adc.get_last_value()[0]
+        m.now += .7
+        first = m.tool_manager.get_status(m.now)['id_last_reset']
+        for _ in range(4):
+            status = m.tool_manager.get_status(m.now)
+            self.assertEqual(status['id_last_reset'], first)
+        self.assertEqual(first['previous_tool'], 'IR_LASER')
+        self.assertEqual(first['filter_samples'], 20)
+
     def test_measured_motor_noise_range_preserves_active_job(self):
         m = Machine()
         m.job()

@@ -18,6 +18,45 @@ section. Their defaults also apply to configurations that omit them:
 | `stable_samples` | `3` | Consecutive accepted classifications with a full mean window required for recognition. |
 | `max_sample_age` | `0.6` | Maximum age of the latest ADC report, in seconds. |
 
+Each ID class also has three optional settings. Replace `<prefix>` with a name
+from the table below:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `<prefix>_id_center` | See table | Center of the scaled ADC interval, in percent. |
+| `<prefix>_id_tolerance` | `3.0` | Acquisition half-width while all stepper drivers are disabled, in percentage points. |
+| `<prefix>_id_tolerance_steppers_on` | Value of `<prefix>_id_tolerance` | Acquisition half-width while any stepper driver is enabled, including stationary energized motors. |
+
+| ID class | Prefix | Default center |
+| --- | --- | --- |
+| BLUE_LASER | `blue_laser` | `80.0` |
+| IR_LASER | `ir_laser` | `57.4` |
+| DREMEL | `dremel` | `17.58` |
+| BLUE_LASER+IR_LASER | `blue_laser_ir_laser` | `68.79` |
+| BLUE_LASER+DREMEL | `blue_laser_dremel` | `50.0` |
+| IR_LASER+DREMEL | `ir_laser_dremel` | `41.82` |
+| NONE | `none` | `31.21` |
+
+The laser configuration explicitly selects a narrow idle band and a wider motor
+band for all seven classes, for example:
+
+```ini
+[laser_tool_manager]
+ir_laser_id_center: 57.4
+ir_laser_id_tolerance: 1.0
+ir_laser_id_tolerance_steppers_on: 3.0
+id_hysteresis: 0.5
+```
+
+Older configurations that omit these options retain the previous +/-3 bands in
+both modes. Centers and tolerances must be finite, tolerances positive and
+intervals within 0..100. The enabled tolerance cannot be smaller than the idle
+tolerance. Both modes are checked at startup: no acquisition interval or its
+retention extension may overlap another class's acquisition interval. Retention
+extensions may meet or overlap only within an unassigned gap. Invalid settings
+are rejected rather than resolved by classification order. Update the Klipper
+module before loading configurations with these new options, then restart.
+
 ## Acquisition and retention
 
 Each distinct, fresh ADC report contributes at most once to the mean window.
@@ -35,26 +74,31 @@ polling phases. Changing an established ID can additionally ignore its first
 deviating report. Old explicit window sizes remain valid; omit the option or set
 it to 20 to use the larger default.
 
-A new identity must be acquired inside its open acquisition interval. BLUE_LASER
-uses 77 to 83, centered on the measured idle value of approximately 80 percent.
-This preserves the previous +/-3 percentage point tolerance while correcting the
-old nominal center of 82.12. The observed motor-on range of just below 79 to just
-above 81 lies within the acquisition interval, including at startup with motors
-already enabled.
+A new identity must be acquired inside its open acquisition interval in the
+current driver mode. With the explicit laser configuration, BLUE_LASER acquires
+between 79 and 81 with motors off, or 77 and 83 with motors on. IR_LASER acquires
+between 56.4 and 58.4 off, or 54.4 and 60.4 on. The measured idle centers are
+approximately 80 and 57.4 percent; the old nominal centers were 82.12 and 59.09.
+The observed motor-on ranges of just below 79 to just above 81 (blue), and just
+below 55 to just above 60 (IR), fit the wider bands.
 
-IR_LASER uses 54.4 to 60.4, centered on the measured idle value of 57.4 percent.
-Its previous interval of 56.09 to 62.09 was centered at 59.09, above the measured
-idle value. Recentring preserves the six-percentage-point width and includes
-the reported motor-on range of just below 55 to just above 60 percent. These
-reports can now enter the mean as ordinary IR samples, including at startup;
-they are not repeatedly treated as outliers. Other ID intervals are unchanged.
+Only an established classification uses retention hysteresis. With the explicit
+configuration and 0.5-point hysteresis, blue retains 78.5..81.5 off and
+76.5..83.5 on; IR retains 55.9..58.9 off and 53.9..60.9 on. All bounds are strict.
+The moving mean smooths noise within the retained class.
 
-Only an already established classification uses hysteresis. Once recognized,
-BLUE_LASER is retained while reports remain strictly between 76.5 and 83.5 with
-the default hysteresis; IR_LASER is retained between 53.9 and 60.9. The default
-IR retention range remains separate from the neighboring BLUE_LASER+DREMEL
-conflict interval of 47 to 53. The moving mean smooths noise within the retained
-class.
+The mode comes from `stepper_enable` driver status, not movement speed or the
+idle timeout state. Enabling the first motor widens the intervals without
+resetting a confirmed identity or its mean. Disabling the last enabled motor
+clears the filter and requires a complete new acquisition in the narrow band;
+wide-band history and a repeated cached ADC report cannot confirm an idle ID.
+Partial driver disable does not narrow the bands while any other driver stays
+enabled. Detection also works when acquisition begins with motors already on.
+
+The lid does not freeze identification. ADC sampling, conflict detection and
+disconnect monitoring continue with the lid closed and in the wider motor band.
+Tool changes during offset/raster calibration remain detectable; active grants
+must still be ended before changing tools.
 
 A persistent value outside the acquisition interval cannot acquire a
 tool merely through smoothing. Measure the motor-on and motor-off ranges before
@@ -102,6 +146,15 @@ IR motion protection retains its existing behavior during uncertain detection.
   isolated outlier. Its raw value remains visible in `id_value`.
 - `stable_samples`: consecutive classifications after the window is full.
 - `id_sample_age`: age of the latest report.
+- `id_candidate`: ID class currently filling the filter, even before confirmation.
+- `id_steppers_on`: true if any stepper driver is enabled; false before ready.
+- `id_windows`: effective configuration per class, including center, both
+  configured tolerances, active `tolerance`, acquisition `min`/`max` and
+  retention `hold_min`/`hold_max`.
+- `id_last_reset`: retained context of lost recognition: reason, previous ID,
+  raw value, old mean, buffered report count, driver mode and the last three
+  distinct raw reports. Later filter refills do not overwrite the original
+  cause. A newly confirmed identity can record a subsequent loss.
 - `ready`: false while startup has not completed or after shutdown. Early
   queries return unknown identity, no available controls and no power grant;
   they never read ADCs, temperatures or toolhead status before `klippy:ready`.
@@ -112,8 +165,13 @@ motors disabled and enabled, then repeat the idle tool changes. After recognitio
 settles, the buffer should contain 20 reports and the displayed tool should
 remain stable during the measured motor noise. Confirm NONE and each individual
 tool again. These host tests do not replace the later physical shutdown-latency
-measurement. A boundary shutdown now includes the detected state, raw value and
-current mean so repeated failures provide useful diagnostic values.
+measurement. A boundary shutdown includes the detected state, candidate, raw
+value, current mean, filter occupancy, driver mode, effective acquisition limits
+and last reset reason/recent reports. A message showing UNSTABLE with raw and
+mean both 54.774 does not prove that value fell outside the IR interval: it can
+be the first sample after prior outliers or an ADC reporting gap cleared the
+filter. Inspect the retained reset context instead of widening an already
+matching interval.
 
 The November 9 IR approach log also showed a roughly 4 ms Y_MAX pulse, followed
 by a release. The laser configuration now uses the existing button input's
