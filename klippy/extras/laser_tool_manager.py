@@ -23,11 +23,13 @@ BOUNDARY_AXES = {'X': (0, 1, 'X_MAX'), 'Y': (1, 1, 'Y_MAX'),
 
 
 def classify_id(value, previous=None, hysteresis=0., windows=ID_WINDOWS):
+    # In motor mode windows may overlap. Retain a confirmed identity first;
+    # without one, ambiguity must never be resolved by table order.
     for low, high, name in windows:
-        margin = hysteresis if name == previous else 0.
-        if low - margin < value < high + margin:
+        if name == previous and low - hysteresis < value < high + hysteresis:
             return name
-    return 'UNKNOWN'
+    matches = [name for low, high, name in windows if low < value < high]
+    return matches[0] if len(matches) == 1 else 'UNKNOWN'
 
 
 def file_tool(stream):
@@ -63,6 +65,15 @@ class LaserToolManager:
         self.stable_samples = config.getint('stable_samples', 3, minval=2)
         self.id_filter_size = config.getint(
             'id_filter_samples', 20, minval=1, maxval=50)
+        idle_time = config.getfloat('id_filter_time', None)
+        motor_time = config.getfloat('id_filter_time_steppers_on', idle_time)
+        for name, duration in (('id_filter_time', idle_time),
+                               ('id_filter_time_steppers_on', motor_time)):
+            if duration is not None and (not math.isfinite(duration)
+                                         or not .1 <= duration <= 5.):
+                raise config.error(name + ' muss endlich und zwischen 0.1 und 5 s sein.')
+        self.id_filter_times = {False: idle_time, True: motor_time}
+        self.id_filter_time = idle_time
         self.id_hysteresis = config.getfloat(
             'id_hysteresis', .5, minval=0., maxval=1.)
         if not math.isfinite(self.id_hysteresis):
@@ -96,7 +107,7 @@ class LaserToolManager:
         for enabled, windows in self.id_windows_by_mode.items():
             ordered = sorted(windows)
             for previous, following in zip(ordered, ordered[1:]):
-                if previous[1] + self.id_hysteresis > following[0]:
+                if not enabled and previous[1] + self.id_hysteresis > following[0]:
                     raise config.error(
                         'ID-Fenster/Hysterese ueberlappt fremde Erkennung '
                         + '(Stepper %s): ' % ('an' if enabled else 'aus')
@@ -149,7 +160,11 @@ class LaserToolManager:
         self.last_sample = None
         self.id_value = self.id_age = None
         self.id_filtered_value = None
-        self.id_samples = deque(maxlen=self.id_filter_size)
+        self.id_samples = deque()
+        self.id_sample_times = deque()
+        self.id_filter_started = None
+        self.id_filter_ready = False
+        self.id_noise_rms = None
         self.id_outliers = deque(maxlen=3)
         self.id_ignored_samples = 0
         self.id_last_sample_ignored = False
@@ -284,15 +299,43 @@ class LaserToolManager:
                 'reason': reason, 'previous_tool': self.detected,
                 'raw_value': self.id_value, 'filtered_value': self.id_filtered_value,
                 'filter_samples': len(self.id_samples),
+                'filter_time': self.id_filter_time,
                 'steppers_on': self.id_steppers_on,
                 'recent_values': list(self.id_recent_values)}
         self.id_samples.clear()
+        self.id_sample_times.clear()
+        self.id_filter_started = None
+        self.id_filter_ready = False
+        self.id_noise_rms = None
         self.id_outliers.clear()
         self.id_filtered_value = None
         self.candidate = 'UNKNOWN'
         self.detected = state
         self.samples = 0
         self.id_last_sample_ignored = False
+
+    def _append_id_sample(self, timestamp, value):
+        if self.id_filter_started is None:
+            self.id_filter_started = timestamp
+        self.id_samples.append(value)
+        self.id_sample_times.append(timestamp)
+        if self.id_filter_time is None:
+            while len(self.id_samples) > self.id_filter_size:
+                self.id_samples.popleft()
+                self.id_sample_times.popleft()
+            self.id_filter_ready = len(self.id_samples) >= self.id_filter_size
+        else:
+            cutoff = timestamp - self.id_filter_time
+            while self.id_sample_times[0] < cutoff - 1.e-9:
+                self.id_samples.popleft()
+                self.id_sample_times.popleft()
+            self.id_filter_ready = (
+                timestamp - self.id_filter_started >= self.id_filter_time - 1.e-9
+                and len(self.id_samples) >= 2)
+        self.id_filtered_value = math.fsum(self.id_samples) / len(self.id_samples)
+        self.id_noise_rms = math.sqrt(math.fsum(
+            (sample - self.id_filtered_value) ** 2 for sample in self.id_samples)
+            / len(self.id_samples))
 
     def _update_id(self, eventtime):
         if not self.ready:
@@ -306,6 +349,16 @@ class LaserToolManager:
             self.id_steppers_on = enabled
             self.id_config = self.id_configs[enabled]
             self.id_windows = self.id_windows_by_mode[enabled]
+            self.id_filter_time = self.id_filter_times[enabled]
+            if enabled and self.id_sample_times:
+                # Earlier idle samples were already expired. Only the retained
+                # history may count towards filling the longer motor window.
+                self.id_filter_started = self.id_sample_times[0]
+                self.id_filter_ready = (
+                    len(self.id_samples) >= self.id_filter_size
+                    if self.id_filter_time is None else
+                    self.id_sample_times[-1] - self.id_filter_started
+                    >= self.id_filter_time - 1.e-9 and len(self.id_samples) >= 2)
         timestamp, raw, age = self._read_adc(self.id_sensor.mcu_adc, eventtime)
         value = raw * self.id_sensor.scale + self.id_sensor.offset
         self.id_value = value if math.isfinite(value) else None
@@ -346,6 +399,7 @@ class LaserToolManager:
                     return
                 self._reset_id('UNSTABLE', 'Zwei ID-Abweichungen in drei Berichten')
                 # After revocation, retention hysteresis no longer applies.
+                held = 'UNKNOWN'
                 candidate = classify_id(value, windows=self.id_windows) if valid else 'UNKNOWN'
         if not valid:
             self._reset_id('UNKNOWN', 'ADC-Schienenwert')
@@ -353,16 +407,19 @@ class LaserToolManager:
         if candidate != self.candidate:
             self._reset_id('UNSTABLE')
             self.candidate = candidate
-        self.id_samples.append(value)
-        self.id_filtered_value = math.fsum(self.id_samples) / len(self.id_samples)
+        self._append_id_sample(timestamp, value)
         # UNKNOWN covers several disjoint gaps: their mean could accidentally
         # fall into a real tool's window. Only classify a known class's mean.
         filtered = (classify_id(self.id_filtered_value, held, self.id_hysteresis, self.id_windows)
                     if candidate != 'UNKNOWN' else 'UNKNOWN')
-        if len(self.id_samples) < self.id_filter_size:
-            self.samples = 0
-        else:
+        if self.id_filter_ready:
             self.samples += 1
+        elif held == candidate == filtered and held != 'UNKNOWN':
+            # A confirmed narrow-band identity remains trusted while the longer
+            # motor-on window fills. Raw escape/freshness checks still apply.
+            return
+        else:
+            self.samples = 0
         self.detected = 'UNSTABLE'
         if self.samples >= self.stable_samples:
             self.detected = filtered
@@ -731,11 +788,12 @@ class LaserToolManager:
             window = self.id_config[b['tool']]
             reset = self.id_last_reset or {}
             return ('Werkzeug-ID geaendert/ungueltig (%s; Kandidat=%s; roh=%s; '
-                    'Mittelwert=%s; Samples=%d/%d; Stepper=%s; '
+                    'Mittelwert=%s; Samples=%d/%s; Stepper=%s; '
                     '%s-Fenster=%.3f..%.3f; '
                     'letzter Reset=%s; Rohwerte=%s)'
                     % (self.detected, self.candidate, self.id_value, self.id_filtered_value,
-                       len(self.id_samples), self.id_filter_size,
+                       len(self.id_samples), ('%.2fs' % self.id_filter_time
+                           if self.id_filter_time is not None else self.id_filter_size),
                        'an' if self.id_steppers_on else 'aus', b['tool'],
                        window['min'], window['max'], reset.get('reason', 'Erkennung im Aufbau'),
                        reset.get('recent_values', [])))
@@ -899,7 +957,15 @@ class LaserToolManager:
         return {'detected_tool': self.detected, 'id_value': self.id_value,
                 'id_filtered_value': self.id_filtered_value,
                 'id_filter_samples': len(self.id_samples),
-                'id_filter_size': self.id_filter_size,
+                'id_filter_size': (self.id_filter_size
+                                   if self.id_filter_time is None else None),
+                'id_filter_time': self.id_filter_time,
+                'id_filter_span': (self.id_sample_times[-1] - self.id_sample_times[0]
+                                   if self.id_sample_times else 0.),
+                'id_filter_ready': self.id_filter_ready,
+                'id_noise_rms': self.id_noise_rms,
+                'id_matches': [name for low, high, name in self.id_windows
+                               if self.id_value is not None and low < self.id_value < high],
                 'id_ignored_samples': self.id_ignored_samples,
                 'id_last_sample_ignored': self.id_last_sample_ignored,
                 'id_candidate': self.candidate, 'id_windows': self.id_config,

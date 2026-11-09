@@ -14,6 +14,8 @@ section. Their defaults also apply to configurations that omit them:
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `id_filter_samples` | `20` | Moving mean window size, from 1 to 50, even or odd. A size of 1 disables averaging, but keeps outlier confirmation. |
+| `id_filter_time` | Unset | Moving mean duration with all drivers off, in seconds, 0.1 to 5. Overrides the sample count in this mode. |
+| `id_filter_time_steppers_on` | Value of `id_filter_time` | Moving mean duration while any driver is enabled, in seconds, 0.1 to 5. |
 | `id_hysteresis` | `0.5` | Retention margin on each side of an established ID window, in percentage points of the scaled ID value. Allowed range: 0 to 1. |
 | `stable_samples` | `3` | Consecutive accepted classifications with a full mean window required for recognition. |
 | `max_sample_age` | `0.6` | Maximum age of the latest ADC report, in seconds. |
@@ -43,19 +45,31 @@ band for all seven classes, for example:
 ```ini
 [laser_tool_manager]
 ir_laser_id_center: 57.4
-ir_laser_id_tolerance: 1.0
-ir_laser_id_tolerance_steppers_on: 3.0
-id_hysteresis: 0.5
+ir_laser_id_tolerance: 2.0
+ir_laser_id_tolerance_steppers_on: 5.0
+id_hysteresis: 1.0
+id_filter_time: 0.75
+id_filter_time_steppers_on: 2.5
 ```
 
 Older configurations that omit these options retain the previous +/-3 bands in
 both modes. Centers and tolerances must be finite, tolerances positive and
 intervals within 0..100. The enabled tolerance cannot be smaller than the idle
-tolerance. Both modes are checked at startup: no acquisition interval or its
-retention extension may overlap another class's acquisition interval. Retention
-extensions may meet or overlap only within an unassigned gap. Invalid settings
-are rejected rather than resolved by classification order. Update the Klipper
-module before loading configurations with these new options, then restart.
+tolerance. With drivers off, no acquisition interval or its retention extension
+may overlap another class's acquisition interval. Retention extensions may
+overlap only within an unassigned gap. Motor-on windows may overlap, including
+acquisition intervals: a confirmed identity takes priority inside its own
+retention interval. Without a confirmed identity, multiple matching acquisition
+intervals yield UNKNOWN, regardless of table order. Recognition is never guessed
+from the mean of ambiguous reports. Outside the overlap, a uniquely matching
+motor interval can still acquire an identity. Update the Klipper module before
+loading configurations with these new options. After Python changes, restart
+the **Klipper service**, for example `sudo systemctl restart klipper`, so the
+new process imports the changed module. G-code `RESTART` and `FIRMWARE_RESTART`
+reuse the host process and its Python module cache; they do not reload changed
+Python source. If the MCU still reports a previous shutdown after the service
+restart, issue `FIRMWARE_RESTART` then wait for ready. Config-only changes can
+use the ordinary restart commands once the updated module is running.
 
 ## Acquisition and retention
 
@@ -65,31 +79,53 @@ an outlier. Only values belonging to the same ID class enter a window. A class
 change clears the previous window; unknown values cannot acquire a tool just
 because their arithmetic mean falls inside a tool's interval.
 
-Recognition requires a full window followed by the configured number of stable
-classifications. With the defaults, 22 accepted reports are required: the 20th
+The laser configuration selects time windows of **0.75 s off / 2.5 s on**. MCU
+report timestamps determine expiry; neither polling frequency nor an assumed
+report count determines the duration. Each accepted report in the current time
+window has equal weight. Old reports expire as new accepted reports arrive.
+With a 0.1 s report interval this usually retains 8 idle reports or 26 motor
+reports (both endpoints included when aligned). Other report rates may retain
+more than 50 samples. The window must have elapsed and contain at least two
+reports before stable confirmation begins. Three stable full-window
+classifications normally acquire an idle ID in about 1.0 s from the first
+accepted report, or a motor ID in about 2.7 s, plus reporting/polling phases.
+
+The filtered ID remains the arithmetic mean. RMS of the ADC signal itself
+includes noise energy and would bias the resistor ID upwards. Instead,
+`id_noise_rms` reports the RMS deviation from the mean, equivalent to population
+standard deviation, in percentage points. It uses only the accepted reports in
+the same window; isolated rejected spikes do not enter either statistic.
+
+For configurations omitting both time options, the legacy sample window remains
+in use. With its defaults, 22 accepted reports are required: the 20th
 report produces the first full mean, and the 22nd confirms the ID. At a
 0.1-second report interval, the mean normally covers about two seconds and first
 recognition spans about 2.1 seconds from the first report, plus report and host
 polling phases. Changing an established ID can additionally ignore its first
 deviating report. Old explicit window sizes remain valid; omit the option or set
-it to 20 to use the larger default.
+it to 20 to use the larger count default. Configured time windows override this
+count independently in each driver mode.
 
 A new identity must be acquired inside its open acquisition interval in the
 current driver mode. With the explicit laser configuration, BLUE_LASER acquires
-between 79 and 81 with motors off, or 77 and 83 with motors on. IR_LASER acquires
-between 56.4 and 58.4 off, or 54.4 and 60.4 on. The measured idle centers are
+between 78 and 82 with motors off, or 75 and 85 with motors on. IR_LASER has
+acquisition intervals 55.4..59.4 off, or 52.4..62.4 on, subject to the ambiguity
+rule above. The measured idle centers are
 approximately 80 and 57.4 percent; the old nominal centers were 82.12 and 59.09.
 The observed motor-on ranges of just below 79 to just above 81 (blue), and just
 below 55 to just above 60 (IR), fit the wider bands.
 
 Only an established classification uses retention hysteresis. With the explicit
-configuration and 0.5-point hysteresis, blue retains 78.5..81.5 off and
-76.5..83.5 on; IR retains 55.9..58.9 off and 53.9..60.9 on. All bounds are strict.
+configuration and 1-point hysteresis, blue retains 77..83 off and
+74..86 on; IR retains 54.4..60.4 off and 51.4..63.4 on. All bounds are strict.
 The moving mean smooths noise within the retained class.
 
 The mode comes from `stepper_enable` driver status, not movement speed or the
 idle timeout state. Enabling the first motor widens the intervals without
-resetting a confirmed identity or its mean. Disabling the last enabled motor
+resetting a confirmed identity or its mean. It also expands the time window;
+confirmed identity and power grants remain valid during this warmup. Only the
+retained idle history counts towards filling it, even after long idle operation.
+Disabling the last enabled motor
 clears the filter and requires a complete new acquisition in the narrow band;
 wide-band history and a repeated cached ADC report cannot confirm an idle ID.
 Partial driver disable does not narrow the bands while any other driver stays
@@ -115,7 +151,12 @@ Two deviations within the last three distinct reports discard recognition and
 the old mean. They need not name the same other tool; alternating bad/good/bad
 reports cannot keep the previous tool indefinitely. A persistent tool change or
 disconnection is therefore detected on its second report, independently of the
-20-report mean window. During a job, calibration grant or boundary measurement,
+mean window, including the longer 2.5 s motor window. With overlapping motor
+windows a report inside the held ID's retention interval does not count as a
+deviation, even if another class also matches; those voltages alone cannot
+distinguish noise from a physical change into that overlap. Reports outside the
+held interval, finite rails and ADC failures retain their confirmation rules.
+During a job, calibration grant or boundary measurement,
 the periodic monitor then follows the existing shutdown path. Positive output
 and boundary movement commands also check new reports before proceeding.
 
@@ -139,7 +180,14 @@ IR motion protection retains its existing behavior during uncertain detection.
 - `id_value`: latest scaled raw ADC report, as before; `None` for nonfinite data.
 - `id_filtered_value`: moving arithmetic mean, or `None` after an invalid/stale report.
 - `id_filter_samples`: number of accepted reports currently buffered.
-- `id_filter_size`: configured mean window size.
+- `id_filter_size`: configured sample count in count mode; `None` in time mode.
+- `id_filter_time`: active time window in seconds; `None` in count mode.
+- `id_filter_span`: timestamp difference between oldest and latest buffered
+  reports. With 0.75 s configured and 0.1 s reports this is usually 0.7 s.
+- `id_filter_ready`: whether the selected window has filled. It can be false
+  while a previously confirmed ID is held during motor-on warmup.
+- `id_noise_rms`: RMS deviation of accepted values from their arithmetic mean,
+  in percentage points; `None` after reset.
 - `id_ignored_samples`: cumulative number of reports ignored while retaining an
   established ID since Klippy startup; an initial report of a real change also counts.
 - `id_last_sample_ignored`: whether the latest report was omitted as a possible
@@ -147,6 +195,8 @@ IR motion protection retains its existing behavior during uncertain detection.
 - `stable_samples`: consecutive classifications after the window is full.
 - `id_sample_age`: age of the latest report.
 - `id_candidate`: ID class currently filling the filter, even before confirmation.
+- `id_matches`: all acquisition intervals matching the latest raw value,
+  independently of retention priority; multiple entries expose ambiguity.
 - `id_steppers_on`: true if any stepper driver is enabled; false before ready.
 - `id_windows`: effective configuration per class, including center, both
   configured tolerances, active `tolerance`, acquisition `min`/`max` and
@@ -162,7 +212,8 @@ IR motion protection retains its existing behavior during uncertain detection.
 
 Keep machining power physically off for the first check. Compare status with
 motors disabled and enabled, then repeat the idle tool changes. After recognition
-settles, the buffer should contain 20 reports and the displayed tool should
+settles, `id_filter_ready` should be true, the configured duration should match
+the driver mode, and the displayed tool should
 remain stable during the measured motor noise. Confirm NONE and each individual
 tool again. These host tests do not replace the later physical shutdown-latency
 measurement. A boundary shutdown includes the detected state, candidate, raw

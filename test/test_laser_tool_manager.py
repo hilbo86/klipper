@@ -401,11 +401,57 @@ class IdFilterTests(unittest.TestCase):
         select(m, 54.8)
         self.assertEqual(m.tool_manager.detected, 'IR_LASER')
 
-    def test_motor_band_configuration_rejects_contraction_overlap_and_nonfinite(self):
-        for width in (0., -1., .5, float('nan'), float('inf'), 5.):
+    def test_motor_band_configuration_rejects_contraction_bounds_and_nonfinite(self):
+        for width in (0., -1., .5, float('nan'), float('inf'), 60.):
             with self.subTest(width=width), self.assertRaises(MacroError):
                 Machine(tool_options={'ir_laser_id_tolerance': 1.,
                                       'ir_laser_id_tolerance_steppers_on': width})
+
+    @staticmethod
+    def overlapping_options():
+        options = {'id_hysteresis': 1.}
+        for _, _, tool in MODULE.ID_DEFAULTS:
+            prefix = tool.lower().replace('+', '_') + '_id_'
+            options[prefix + 'tolerance'] = 2.
+            options[prefix + 'tolerance_steppers_on'] = 5.
+        return options
+
+    def test_motor_overlap_loads_and_holding_has_priority_over_table_order(self):
+        for tool, center, overlap in (('NONE', 31.21, 37.),
+                                      ('BLUE_LASER+DREMEL', 50., 54.),
+                                      ('IR_LASER', 57.4, 54.)):
+            with self.subTest(tool=tool):
+                m = Machine(tool_options=self.overlapping_options(), id_value=center)
+                self.motors(m, True)
+                select(m, overlap)
+                self.assertEqual(m.tool_manager.detected, tool)
+                windows = m.tool_manager.id_windows
+                for order in (windows, tuple(reversed(windows))):
+                    self.assertEqual(MODULE.classify_id(overlap, tool, 1., order), tool)
+                if tool not in MODULE.TOOLS:
+                    with self.assertRaises(MacroError):
+                        start_job(m)
+                    self.assertFalse(m.tool_manager.granted)
+
+    def test_motor_overlap_cannot_acquire_identity_without_confirmed_history(self):
+        m = Machine(tool_options=self.overlapping_options(), id_value=54.)
+        self.motors(m, True)
+        select(m, 54.)
+        status = m.tool_manager.get_status(m.now)
+        self.assertEqual(status['detected_tool'], 'UNKNOWN')
+        self.assertEqual(set(status['id_matches']), {'IR_LASER', 'BLUE_LASER+DREMEL'})
+        for order in (m.tool_manager.id_windows, tuple(reversed(m.tool_manager.id_windows))):
+            self.assertEqual(MODULE.classify_id(54., windows=order), 'UNKNOWN')
+        with self.assertRaises(MacroError):
+            start_job(m, 'IR_LASER')
+        self.assertFalse(m.tool_manager.granted)
+        # Stale data also removes the right to retain an ambiguous motor value.
+        select(m, 57.4)
+        self.assertEqual(m.tool_manager.detected, 'IR_LASER')
+        m.now += 1.
+        self.assertEqual(m.tool_manager.get_status(m.now)['detected_tool'], 'UNSTABLE')
+        select(m, 54.)
+        self.assertEqual(m.tool_manager.detected, 'UNKNOWN')
 
     def test_closed_lid_and_enabled_motors_still_detect_disconnects_and_conflicts(self):
         for value in (0., 100., 31.21, 50., 68.79, 41.82, 80.,
@@ -835,6 +881,138 @@ class IdFilterTests(unittest.TestCase):
                         {'id_hysteresis': float('nan')}):
             with self.subTest(options=options), self.assertRaises(MacroError):
                 Machine(tool_options=options)
+
+
+class TimedIdFilterTests(unittest.TestCase):
+    OPTIONS = {'id_filter_time': .75, 'id_filter_time_steppers_on': 2.5}
+
+    @staticmethod
+    def report(machine, value, dt=.1, poll=False):
+        machine.objects['analog_input ID'].data['value'] = value
+        machine.now += dt
+        if poll:
+            machine.tool_manager._poll(machine.now)
+        return machine.tool_manager.get_status(machine.now)
+
+    def test_idle_and_motor_acquisition_require_real_elapsed_time_and_stable_reports(self):
+        for enabled, count, duration in ((False, 8, .75), (True, 25, 2.5)):
+            with self.subTest(enabled=enabled):
+                m = Machine(tool_options=self.OPTIONS, id_value=0.)
+                IdFilterTests.motors(m, enabled)
+                for _ in range(count):
+                    status = self.report(m, 80.)
+                    self.assertFalse(status['id_filter_ready'])
+                    self.assertEqual(status['detected_tool'], 'UNSTABLE')
+                for expected_stable in (1, 2, 3):
+                    status = self.report(m, 80.)
+                    self.assertTrue(status['id_filter_ready'])
+                    self.assertEqual(status['stable_samples'], expected_stable)
+                    self.assertEqual(status['id_filter_time'], duration)
+                self.assertEqual(status['detected_tool'], 'BLUE_LASER')
+                self.assertIsNone(status['id_filter_size'])
+                self.assertAlmostEqual(status['id_filter_span'], .7 if not enabled else 2.5)
+
+    def test_real_time_window_expires_old_reports_with_irregular_cadence(self):
+        m = Machine(tool_options=self.OPTIONS, id_value=0.)
+        reports = []
+        for dt, value in ((.1, 78.), (.15, 81.), (.25, 79.), (.3, 82.),
+                          (.2, 80.), (.4, 78.5), (.1, 81.5)):
+            status = self.report(m, value, dt)
+            reports.append((m.now, value))
+            retained = [value for when, value in reports if when >= m.now - .75 - 1.e-9]
+            self.assertEqual(status['id_filter_samples'], len(retained))
+            self.assertAlmostEqual(status['id_filtered_value'], sum(retained) / len(retained))
+            self.assertLessEqual(status['id_filter_span'], .75 + 1.e-9)
+        frozen = (status['id_filter_samples'], status['stable_samples'], status['id_filtered_value'])
+        for _ in range(20):
+            status = m.tool_manager.get_status(m.now)
+            self.assertEqual((status['id_filter_samples'], status['stable_samples'],
+                              status['id_filtered_value']), frozen)
+
+    def test_time_window_supports_more_than_fifty_reports_at_high_report_rate(self):
+        m = Machine(tool_options=self.OPTIONS, id_value=0.)
+        for _ in range(80):
+            status = self.report(m, 80., .01)
+        self.assertEqual(status['detected_tool'], 'BLUE_LASER')
+        self.assertEqual(status['id_filter_samples'], 76)
+        self.assertAlmostEqual(status['id_filter_span'], .75)
+
+    def test_rms_noise_is_centered_on_arithmetic_mean_without_biasing_identity(self):
+        m = Machine(tool_options={'id_filter_time': .5}, id_value=0.)
+        for value in (79., 81.) * 5:
+            status = self.report(m, value)
+        self.assertEqual(status['detected_tool'], 'BLUE_LASER')
+        self.assertEqual(status['id_filter_samples'], 6)
+        self.assertEqual(status['id_filtered_value'], 80.)
+        self.assertAlmostEqual(status['id_noise_rms'], 1.)
+
+    def test_confirmed_identity_and_power_survive_longer_motor_window_warmup(self):
+        m = Machine(tool_options=self.OPTIONS)
+        for _ in range(50):
+            self.report(m, 80.)
+        m.job()
+        IdFilterTests.motors(m, True)
+        self.assertFalse(m.tool_manager.get_status(m.now)['id_filter_ready'])
+        status = self.report(m, 81., poll=True)
+        self.assertEqual(status['id_filter_time'], 2.5)
+        self.assertFalse(status['id_filter_ready'])
+        self.assertEqual(status['detected_tool'], 'BLUE_LASER')
+        self.assertTrue(status['power_granted'])
+        for value in (79., 81.) * 20:
+            status = self.report(m, value, poll=True)
+            self.assertEqual(status['detected_tool'], 'BLUE_LASER')
+            self.assertTrue(status['power_granted'])
+            self.assertIsNone(m.shutdown_message)
+        self.assertTrue(status['id_filter_ready'])
+        self.assertEqual(status['id_filter_samples'], 26)
+
+    def test_motor_off_requires_fresh_short_window_and_clears_wide_history(self):
+        m = Machine(tool_options=self.OPTIONS)
+        IdFilterTests.motors(m, True)
+        select(m, 81.)
+        IdFilterTests.motors(m, False)
+        status = m.tool_manager.get_status(m.now)
+        self.assertEqual(status['id_filter_time'], .75)
+        self.assertEqual(status['id_filter_samples'], 0)
+        self.assertIsNone(status['id_noise_rms'])
+        self.assertFalse(status['id_filter_ready'])
+        for _ in range(10):
+            self.assertEqual(self.report(m, 80.)['detected_tool'], 'UNSTABLE')
+        status = self.report(m, 80.)
+        self.assertEqual(status['detected_tool'], 'BLUE_LASER')
+        self.assertEqual(status['id_filtered_value'], 80.)
+
+    def test_long_window_does_not_delay_raw_escape_or_adc_failure(self):
+        for invalid in ('disconnect', 'stale', 'gap', 'nan'):
+            with self.subTest(invalid=invalid):
+                m = Machine(tool_options=self.OPTIONS, id_value=57.4)
+                IdFilterTests.motors(m, True)
+                select(m, 57.4)
+                m.run('TOOL_BOUNDS_BEGIN TOOL=IR_LASER AXIS=Y LIMIT=292')
+                if invalid == 'disconnect':
+                    status = self.report(m, 0., poll=True)
+                    self.assertIsNone(m.shutdown_message)
+                    self.assertAlmostEqual(status['id_filtered_value'], 57.4)
+                    self.report(m, 0., poll=True)
+                elif invalid == 'stale':
+                    adc = m.objects['analog_input ID'].mcu_adc
+                    adc.timestamp = adc.get_last_value()[0]
+                    m.now += .7
+                    m.tool_manager._poll(m.now)
+                elif invalid == 'gap':
+                    m.now += 1.
+                    self.report(m, 57.4, poll=True)
+                else:
+                    self.report(m, float('nan'), poll=True)
+                self.assertIsNotNone(m.shutdown_message)
+                self.assertFalse(m.tool_manager.granted)
+                self.assertLessEqual(len(m.tool_manager.id_samples), 1)
+
+    def test_time_parameters_reject_invalid_values(self):
+        for option in ('id_filter_time', 'id_filter_time_steppers_on'):
+            for value in (0., -.1, .01, 5.01, float('nan'), float('inf')):
+                with self.subTest(option=option, value=value), self.assertRaises(MacroError):
+                    Machine(tool_options={option: value})
 
 
 if __name__ == '__main__':

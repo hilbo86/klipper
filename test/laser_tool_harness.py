@@ -1,6 +1,7 @@
 """Standalone Klipper doubles, also used by configuration macro integration tests."""
 import importlib.util
 import io
+import math
 import shlex
 from pathlib import Path
 from types import SimpleNamespace
@@ -258,7 +259,9 @@ def attach(host, tool_options=None, initialize=True):
     # Warm up real reports before the timing tests' zero point.
     manager = host.tool_manager
     start = host.now
-    for remaining in reversed(range(manager.id_filter_size
+    count = (math.ceil(manager.id_filter_time / .1) + 1
+             if manager.id_filter_time is not None else manager.id_filter_size)
+    for remaining in reversed(range(count
                                     + manager.stable_samples - 1)):
         host.now = start - remaining * .1
         manager._update_id(host.now)
@@ -285,8 +288,11 @@ def start_job(host, tool='BLUE_LASER'):
 def select(machine, value):
     machine.objects['analog_input ID'].data['value'] = value
     manager = machine.tool_manager
+    manager._update_id(machine.now)
+    count = (math.ceil(manager.id_filter_time / .1) + 1
+             if manager.id_filter_time is not None else manager.id_filter_size)
     # One report may be ignored while the previous identity is still trusted.
-    for _ in range(manager.id_filter_size + manager.stable_samples):
+    for _ in range(count + manager.stable_samples):
         machine.now += .1
         manager._update_id(machine.now)
 
