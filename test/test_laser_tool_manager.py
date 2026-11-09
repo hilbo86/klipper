@@ -3,11 +3,66 @@
     python -m unittest discover -s test -p test_laser_tool_manager.py
 """
 import io
+import json
 from types import SimpleNamespace
 import unittest
 
 from laser_tool_harness import (
     Machine, MacroError, MODULE, measured_profile, move, select, start_job)
+
+
+class StartupTests(unittest.TestCase):
+    def test_status_before_ready_needs_no_hardware_objects(self):
+        m = Machine(initialize=False)
+        m.objects.clear()
+        for _ in range(5):
+            status = m.tool_manager.get_status(m.now)
+            self.assertFalse(status['ready'])
+            self.assertFalse(status['power_granted'])
+            self.assertEqual(status['detected_tool'], 'UNKNOWN')
+            self.assertEqual(status['id_filter_samples'], 0)
+            self.assertIsNone(status['id_value'])
+            self.assertFalse(status['z_at_top'])
+            self.assertEqual(status['available_controls'], [])
+            self.assertEqual(status['temperature_sensors'], [])
+            self.assertTrue(status['blocked_reasons'])
+            json.dumps(status, allow_nan=False)
+
+    def test_status_during_ready_then_normal_acquisition(self):
+        m = Machine(initialize=False)
+        head = m.objects['toolhead']
+        original = head.get_status
+        snapshots = []
+        def interleaved(eventtime):
+            snapshots.append(m.tool_manager.get_status(eventtime))
+            return original(eventtime)
+        head.get_status = interleaved
+        m.tool_manager._ready()
+        head.get_status = original
+        self.assertTrue(snapshots)
+        self.assertTrue(all(not status['ready'] for status in snapshots))
+        select(m, 80.)
+        status = m.tool_manager.get_status(m.now)
+        self.assertTrue(status['ready'])
+        self.assertEqual(status['detected_tool'], 'BLUE_LASER')
+        self.assertFalse(status['power_granted'])
+
+    def test_failed_initialization_keeps_status_safe_and_unready(self):
+        m = Machine(initialize=False, tool_options={'boundary_x_max': 265.})
+        with self.assertRaises(MacroError):
+            m.tool_manager._ready()
+        status = m.tool_manager.get_status(m.now)
+        self.assertFalse(status['ready'])
+        self.assertFalse(status['power_granted'])
+        self.assertEqual(status['detected_tool'], 'UNKNOWN')
+
+    def test_shutdown_before_ready_still_allows_status(self):
+        m = Machine(initialize=False)
+        m.invoke_shutdown('startup failed')
+        status = m.tool_manager.get_status(m.now)
+        self.assertFalse(status['ready'])
+        self.assertFalse(status['power_granted'])
+        self.assertTrue(m.tool_manager.stopped)
 
 
 class ToolTests(unittest.TestCase):

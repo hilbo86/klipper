@@ -6,7 +6,8 @@ The tool manager's unit tests and host doubles are owned by Klipper:
   output interlocks, shutdown, movement limits, pause/resume admission and
   calibration lifecycle. Includes moving means, isolated outlier rejection,
   hysteresis, motor-noise regression cases, confirmation of real ID loss without
-  waiting for the mean window, and full reacquisition.
+  waiting for the mean window, full reacquisition and safe status queries before
+  ready, during initialization and after failed initialization/early shutdown.
 - `laser_tool_harness.py`: synthetic host, ADC, pin, fan and motion interfaces.
 - `test_laser_tool_bounds.py`: power-off measurement sessions, one-axis steps,
   temporary Cartesian limits, interlocks, isolated ID spikes during movement,

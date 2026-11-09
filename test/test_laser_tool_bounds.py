@@ -108,7 +108,7 @@ class BoundaryTests(unittest.TestCase):
             m.objects['gcode_button X_MAX'].data['state'] = 'PRESSED'
             m.tool_manager._poll(m.now)
         head.wait_moves = trigger_during_wait
-        with self.assertRaises(MacroError):
+        with self.assertRaisesRegex(MacroError, 'Anfahrt abgebrochen:.*Y_MAX|Anfahrt abgebrochen:.*X_MAX'):
             m.run('TOOL_BOUNDS_APPROACH POSITION=251')
         self.assertIn('Grenztaster vor Suchstart', m.shutdown_message)
         self.assertEqual(head.kin.limits[0], (0., 266.))

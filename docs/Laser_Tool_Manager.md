@@ -92,6 +92,10 @@ IR motion protection retains its existing behavior during uncertain detection.
   isolated outlier. Its raw value remains visible in `id_value`.
 - `stable_samples`: consecutive classifications after the window is full.
 - `id_sample_age`: age of the latest report.
+- `ready`: false while startup has not completed or after shutdown. Early
+  queries return unknown identity, no available controls and no power grant;
+  they never read ADCs, temperatures or toolhead status before `klippy:ready`.
+  Status also remains safe if initialization fails or shutdown occurs early.
 
 Keep machining power physically off for the first check. Compare status with
 motors disabled and enabled, then repeat the idle tool changes. After recognition
@@ -100,6 +104,13 @@ remain stable during the measured motor noise. Confirm NONE and each individual
 tool again. These host tests do not replace the later physical shutdown-latency
 measurement. A boundary shutdown now includes the detected state, raw value and
 current mean so repeated failures provide useful diagnostic values.
+
+The November 9 IR approach log also showed a roughly 4 ms Y_MAX pulse, followed
+by a release. The laser configuration now uses the existing button input's
+`debounce_delay: 0.020` to suppress these short transitions before the approach
+monitor sees them. A persistent trigger still reaches the shutdown monitor;
+confirmation adds 20 ms plus host scheduling latency. The ADC ID filter is
+independent of this digital input filtering.
 
 ## Power-off travel limit measurement
 

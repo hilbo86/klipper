@@ -212,7 +212,7 @@ class GCode:
         self.host.error(message)
 
 
-def attach(host, tool_options=None):
+def attach(host, tool_options=None, initialize=True):
     gcode = GCode(host)
     host.backend_gcode = gcode
     host.handlers = {}
@@ -250,6 +250,8 @@ def attach(host, tool_options=None):
     host.objects['gcode_macro COMPRESSOR_VARS'].variables = host.v
     host.tool_manager = MODULE.LaserToolManager(Config(host, tool_options))
     host.objects['laser_tool_manager'] = host.tool_manager
+    if not initialize:
+        return
     host.tool_manager._ready()
     # Warm up real reports before the timing tests' zero point.
     manager = host.tool_manager
@@ -306,7 +308,7 @@ class Machine:
     This host does not reproduce the printer's compressor or job macro logic.
     The configuration repository executes those real Jinja macros separately.
     """
-    def __init__(self, tool_options=None, id_value=80.):
+    def __init__(self, tool_options=None, id_value=80., initialize=True):
         self.now = 0.
         self.events = []
         self.variables = {'COMPRESSOR_VARS': {
@@ -324,7 +326,7 @@ class Machine:
         self.pins = {name: {'value': 0.} for name in (
             'laser', 'aux_tool', 'tool_enable', 'Steckdose_4', 'air_assist')}
         self.fans = {}
-        attach(self, tool_options)
+        attach(self, tool_options, initialize)
         # Periphery readiness is fixture input to module tests. Its actual
         # preparation is checked against the real configuration macros.
         if self.tool_manager.detected == 'BLUE_LASER':

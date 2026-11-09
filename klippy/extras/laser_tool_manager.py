@@ -55,6 +55,8 @@ class LaserToolManager:
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
         self.gcode = self.printer.lookup_object('gcode')
+        # Webhooks may query this object while MCUs are still connecting.
+        self.ready = False
         self.id_name = config.get('id_input', 'analog_input ID')
         self.stable_samples = config.getint('stable_samples', 3, minval=2)
         self.id_filter_size = config.getint(
@@ -199,6 +201,7 @@ class LaserToolManager:
         fan_handlers = self.gcode.mux_commands['SET_FAN_SPEED'][1]
         for name in self.cooling_requested:
             fan_handlers[name] = self._cooling_handler(name, fan_handlers[name])
+        self.ready = True
         self.reactor.register_timer(self._poll, self.reactor.NOW)
 
     def _cooling_handler(self, name, original):
@@ -239,6 +242,8 @@ class LaserToolManager:
         self.id_last_sample_ignored = False
 
     def _update_id(self, eventtime):
+        if not self.ready:
+            return
         timestamp, raw, age = self._read_adc(self.id_sensor.mcu_adc, eventtime)
         value = raw * self.id_sensor.scale + self.id_sensor.offset
         self.id_value = value if math.isfinite(value) else None
@@ -314,6 +319,8 @@ class LaserToolManager:
         return self.printer.lookup_object('gcode_macro COMPRESSOR_VARS').variables
 
     def _reasons(self, tool=None, reference=False, calibration=False):
+        if not self.ready:
+            return ['Werkzeugverwaltung startet; noch keine Freigabe']
         eventtime = self.reactor.monotonic()
         self._update_id(eventtime)
         tool = tool or self.detected
@@ -669,7 +676,7 @@ class LaserToolManager:
         if self.boundary_approaching and self.printer.lookup_object(
                 'gcode_button ' + b['button']).get_status(
                     self.reactor.monotonic())['state'] != 'RELEASED':
-            return 'Grenztaster vor Suchstart ausgeloest'
+            return 'Grenztaster vor Suchstart ausgeloest (%s)' % b['button']
         for name in ('pwm_tool laser', 'pwm_tool aux_tool', 'output_pin tool_enable'):
             if self.printer.lookup_object(name).get_status(
                     self.reactor.monotonic())['value']:
@@ -748,7 +755,8 @@ class LaserToolManager:
             self.toolhead.manual_move(position, speed)
             self.toolhead.wait_moves()
             if self.stopped or self.boundary is not b:
-                raise gcmd.error('Grenzvermessung: Anfahrt abgebrochen.')
+                raise gcmd.error('Grenzvermessung: Anfahrt abgebrochen: '
+                                 + (self.fault or 'Messsitzung nicht mehr aktiv.'))
             self._update_id(self.reactor.monotonic())
             reason = self._boundary_reason()
             if reason:
@@ -831,7 +839,8 @@ class LaserToolManager:
                     self._temperature_valid(tool, eventtime) else [],
                 'applied_offset': self.applied_offset,
                 'ir_z_locked': (self.job_tool or self.motion_tool) == 'IR_LASER',
-                'z_at_top': self._z_at_top(self.toolhead.get_status(eventtime)),
+                'ready': self.ready and not self.stopped,
+                'z_at_top': self.ready and self._z_at_top(self.toolhead.get_status(eventtime)),
                 'calibrating': self.calibrating,
                 'calibration_valid': self.calibration_valid,
                 'boundary_measurement': ({key: self.boundary[key] for key in
