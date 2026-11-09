@@ -6,8 +6,8 @@ from collections import deque
 
 TOOLS = ('BLUE_LASER', 'IR_LASER', 'DREMEL')
 ID_WINDOWS = (
-    # Main ID measured at 80%; preserve the original +/-3 point tolerance.
-    (77.00, 83.00, 'BLUE_LASER'), (56.09, 62.09, 'IR_LASER'),
+    # Measured idle centers: Main 80%, IR 57.4%; keep +/-3 point tolerance.
+    (77.00, 83.00, 'BLUE_LASER'), (54.40, 60.40, 'IR_LASER'),
     (14.58, 20.58, 'DREMEL'), (65.79, 71.79, 'BLUE_LASER+IR_LASER'),
     (47.00, 53.00, 'BLUE_LASER+DREMEL'),
     (38.82, 44.82, 'IR_LASER+DREMEL'), (28.21, 34.21, 'NONE'))

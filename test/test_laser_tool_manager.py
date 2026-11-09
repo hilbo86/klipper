@@ -347,6 +347,56 @@ class IdFilterTests(unittest.TestCase):
                 self.assertIsNone(m.shutdown_message)
                 self.assertTrue(m.tool_manager.granted)
 
+    def test_ir_acquires_across_measured_motor_range_and_from_noisy_startup(self):
+        for value in (54.8, 54.99, 57.4, 60.05, 60.25):
+            with self.subTest(value=value):
+                m = Machine(id_value=value)
+                self.assertEqual(m.tool_manager.detected, 'IR_LASER')
+                self.assertFalse(m.tool_manager.granted)
+        m = Machine(id_value=0.)
+        count = m.tool_manager.id_filter_size + m.tool_manager.stable_samples - 1
+        for index in range(count):
+            status = self.report(m, (54.8, 54.95, 60.2, 60.25, 57.4)[index % 5])
+            self.assertEqual(status['detected_tool'], 'IR_LASER' if index == count - 1 else 'UNSTABLE')
+        self.assertEqual(status['id_ignored_samples'], 0)
+
+    def test_ir_motor_noise_preserves_active_job_and_power(self):
+        m = Machine(id_value=57.4)
+        measured_profile(m, 'IR_LASER')
+        start_job(m, 'IR_LASER')
+        m.power(.1)
+        for value in (57.4, 54.8, 54.95, 60.2, 60.25, 56.5, 58.4) * 10:
+            status = self.report(m, value, poll=True)
+            self.assertEqual(status['detected_tool'], 'IR_LASER')
+            self.assertTrue(status['power_granted'])
+            self.assertEqual(status['id_ignored_samples'], 0)
+            self.assertEqual(m.pins['aux_tool']['value'], .1)
+            self.assertIsNone(m.shutdown_message)
+
+    def test_ir_window_keeps_adjacent_conflict_ids_separate(self):
+        for value in (47.01, 50., 52.99):
+            self.assertEqual(MODULE.classify_id(value, 'IR_LASER', .5),
+                             'BLUE_LASER+DREMEL')
+        for value in (53.5, 53.8, 60.91):
+            self.assertEqual(MODULE.classify_id(value, 'IR_LASER', .5), 'UNKNOWN')
+        for value in (54.3, 60.5):
+            self.assertEqual(MODULE.classify_id(value), 'UNKNOWN')
+            self.assertEqual(MODULE.classify_id(value, 'IR_LASER', .5), 'IR_LASER')
+
+    def test_ir_true_loss_or_change_still_revokes_power_on_second_report(self):
+        for value in (53.89, 60.91, 50., 31.21, 80., 16.8):
+            with self.subTest(value=value):
+                m = Machine(id_value=57.4)
+                measured_profile(m, 'IR_LASER')
+                start_job(m, 'IR_LASER')
+                m.power(.1)
+                self.report(m, value, poll=True)
+                self.assertIsNone(m.shutdown_message)
+                self.report(m, value, poll=True)
+                self.assertIsNotNone(m.shutdown_message)
+                self.assertFalse(m.tool_manager.granted)
+                self.assertEqual(m.pins['aux_tool']['value'], 0.)
+
     def test_mean_smooths_in_band_noise_and_reports_raw_value(self):
         m = Machine(id_value=80.)
         window = [80.] * 20

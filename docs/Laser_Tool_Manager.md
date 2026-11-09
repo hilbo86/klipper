@@ -40,11 +40,21 @@ uses 77 to 83, centered on the measured idle value of approximately 80 percent.
 This preserves the previous +/-3 percentage point tolerance while correcting the
 old nominal center of 82.12. The observed motor-on range of just below 79 to just
 above 81 lies within the acquisition interval, including at startup with motors
-already enabled. The other ID intervals are unchanged.
+already enabled.
+
+IR_LASER uses 54.4 to 60.4, centered on the measured idle value of 57.4 percent.
+Its previous interval of 56.09 to 62.09 was centered at 59.09, above the measured
+idle value. Recentring preserves the six-percentage-point width and includes
+the reported motor-on range of just below 55 to just above 60 percent. These
+reports can now enter the mean as ordinary IR samples, including at startup;
+they are not repeatedly treated as outliers. Other ID intervals are unchanged.
 
 Only an already established classification uses hysteresis. Once recognized,
 BLUE_LASER is retained while reports remain strictly between 76.5 and 83.5 with
-the default hysteresis. The moving mean smooths noise within this interval.
+the default hysteresis; IR_LASER is retained between 53.9 and 60.9. The default
+IR retention range remains separate from the neighboring BLUE_LASER+DREMEL
+conflict interval of 47 to 53. The moving mean smooths noise within the retained
+class.
 
 A persistent value outside the acquisition interval cannot acquire a
 tool merely through smoothing. Measure the motor-on and motor-off ranges before
@@ -111,6 +121,14 @@ by a release. The laser configuration now uses the existing button input's
 monitor sees them. A persistent trigger still reaches the shutdown monitor;
 confirmation adds 20 ms plus host scheduling latency. The ADC ID filter is
 independent of this digital input filtering.
+
+Routine ID reports do not switch the Y measurement laser. Confirmed invalid ID
+aborts the boundary session via MCU shutdown, which applies Y_Laser's configured
+zero shutdown value. The script also explicitly disables Y_Laser during cleanup,
+including after an error caught before the periodic shutdown monitor runs. An
+extinguished measurement laser can therefore be a consequence of an ID failure;
+it is not proof of the initiating fault. Noise regression tests cover the full
+IR Y scan and approach with Y_Laser enabled throughout normal measurement.
 
 ## Power-off travel limit measurement
 

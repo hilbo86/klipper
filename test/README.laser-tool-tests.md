@@ -5,7 +5,7 @@ The tool manager's unit tests and host doubles are owned by Klipper:
 - `test_laser_tool_manager.py`: ID stability and freshness, file preflight,
   output interlocks, shutdown, movement limits, pause/resume admission and
   calibration lifecycle. Includes moving means, isolated outlier rejection,
-  hysteresis, motor-noise regression cases, confirmation of real ID loss without
+  hysteresis, measured Main/IR motor-noise regression cases, confirmation of real ID loss without
   waiting for the mean window, full reacquisition and safe status queries before
   ready, during initialization and after failed initialization/early shutdown.
 - `laser_tool_harness.py`: synthetic host, ADC, pin, fan and motion interfaces.
